@@ -1,0 +1,61 @@
+{
+  "name": "culinario",
+  "version": "0.0.1",
+  "description": "A Quasar Project",
+  "productName": "Quasar App",
+  "author": "Julia Oberhauser <julia@bluebottle.gg>",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "lint": "eslint -c ./eslint.config.js \"./src*/**/*.{ts,js,cjs,mjs,vue}\"",
+    "format": "prettier --write \"**/*.{js,ts,vue,scss,html,md,json}\" --ignore-path .gitignore",
+    "test": "echo \"No test specified\" && exit 0",
+    "dev": "quasar dev",
+    "build": "quasar build",
+    "postinstall": "quasar prepare"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@quasar/extras": "^1.16.4",
+    "axios": "^1.2.1",
+    "firebase": "^12.9.0",
+    "fraction.js": "^5.3.4",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.1.0",
+    "lucide-vue-next": "^0.562.0",
+    "pdfmake": "^0.3.3",
+    "pinia": "^3.0.1",
+    "quasar": "^2.16.0",
+    "vue": "^3.5.22",
+    "vue-advanced-cropper": "^2.8.9",
+    "vue-draggable-next": "^2.3.0",
+    "vue-i18n": "^11.0.0",
+    "vue-router": "^4.0.12"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "@intlify/unplugin-vue-i18n": "^4.0.0",
+    "@quasar/app-vite": "^2.1.0",
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/node": "^20.5.9",
+    "@types/pdfmake": "^0.3.1",
+    "@vue/eslint-config-prettier": "^10.1.0",
+    "@vue/eslint-config-typescript": "^14.4.0",
+    "autoprefixer": "^10.4.23",
+    "eslint": "^9.14.0",
+    "eslint-plugin-vue": "^10.4.0",
+    "globals": "^16.4.0",
+    "postcss": "^8.5.6",
+    "prettier": "^3.3.3",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.2",
+    "vite-plugin-checker": "^0.11.0",
+    "vue-eslint-parser": "^10.2.0",
+    "vue-tsc": "^3.0.7"
+  },
+  "engines": {
+    "node": "^28 || ^26 || ^24 || ^22 || ^20",
+    "npm": ">= 6.13.4",
+    "yarn": ">= 1.21.1"
+  }
+}
