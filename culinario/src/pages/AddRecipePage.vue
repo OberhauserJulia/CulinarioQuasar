@@ -6,7 +6,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { VueDraggableNext } from 'vue-draggable-next';
 
 // 1. Zentrale Typen importieren
-import type { Recipe, IngredientItem, IngredientFirebase } from '../types/index';
+import type { Recipe, RecipeFirebase, IngredientItem, IngredientFirebase } from '../types/index';
 
 // 2. Deine neuen Service-Funktionen importieren
 import {
@@ -18,7 +18,8 @@ import {
   getIngredientById,
   addIngredient,
   updateIngredient,
-  getIngredients
+  getIngredients,
+  addRecipeCategory
 } from '../firebase/services';
 
 // 3. Parser & Umrechner importieren
@@ -52,14 +53,15 @@ const localImagePreview = ref<string>('');
 const CLOUDINARY_CLOUD_NAME = 'ddwxwy7j0';
 const CLOUDINARY_UPLOAD_PRESET = 'ml_default';
 
-const recipeData = ref<Partial<Recipe>>({
+const recipeData = ref<Partial<Recipe> & { visibility: 'public' | 'private' }>({
   name: '',
   category: '',
   ovensettings: '',
   source: '',
   ingredients: [],
   preparationSteps: [],
-  image: ''
+  image: '',
+  visibility: 'public'
 });
 
 interface LocalIngredient {
@@ -896,6 +898,34 @@ const addIngredientToStep = (stepIndex: number) => {
   }
 };
 
+const promptNewCategory = () => {
+  $q.dialog({
+    title: 'Neue Kategorie',
+    message: 'Wie soll die neue Kategorie heißen?',
+    prompt: {
+      model: '',
+      type: 'text'
+    },
+    cancel: true,
+    persistent: true
+  }).onOk((name: string) => {
+    // Wir kapseln die asynchrone Logik in ein void-Statement
+    void (async () => {
+      if (name && name.trim() !== '') {
+        try {
+          const newId = await addRecipeCategory(name.trim());
+          await loadCategories();
+          recipeData.value.category = newId;
+          $q.notify({ type: 'positive', message: `Kategorie "${name}" erstellt!` });
+        } catch (e) {
+          console.error(e);
+          $q.notify({ type: 'negative', message: 'Fehler beim Erstellen der Kategorie.' });
+        }
+      }
+    })();
+  });
+};
+
 const submitRecipe = async () => {
   if (hasUnprocessedIngredients.value) {
     await processAllIngredients();
@@ -992,9 +1022,17 @@ onMounted(async () => {
     try {
       const data = await getRecipeById(editId.value);
       if (data) {
-        recipeData.value = { ...data };
-        uiRecipeAmount.value = data.recipeamount ? `${data.recipeamount.amount} ${data.recipeamount.unit}`.trim() : '';
+        const recipeWithVisibility = data as RecipeFirebase & { visibility?: 'public' | 'private' };
 
+        recipeData.value = {
+          ...data,
+          visibility: recipeWithVisibility.visibility || 'public'
+        };
+
+        uiRecipeAmount.value = data.recipeamount
+          ? `${data.recipeamount.amount} ${data.recipeamount.unit}`.trim()
+          : '';
+        uiRecipeAmount.value = data.recipeamount ? `${data.recipeamount.amount} ${data.recipeamount.unit}`.trim() : '';
         const rawIngs = data.ingredients || [];
         uiIngredients.value = [];
 
@@ -1143,10 +1181,27 @@ const resolveIngredientDetailsForSteps = async () => {
               </div>
 
               <div class="q-mb-md">
+                <div class="text-primary text-weight-bold text-subtitle-responsive q-mb-sm">Privatsphäre</div>
+                <q-btn-toggle v-model="recipeData.visibility" spread no-caps rounded unelevated toggle-color="primary"
+                  color="dark" text-color="grey-5" :options="[
+                    { label: 'Für WG sichtbar', value: 'public', icon: 'groups' },
+                    { label: 'Nur für mich', value: 'private', icon: 'lock' }
+                  ]" />
+              </div>
+
+              <div class="q-mb-md">
                 <div class="text-primary text-weight-bold text-subtitle-responsive q-mb-sm">Sonstiges</div>
                 <div class="q-gutter-y-sm">
-                  <q-select v-model="recipeData.category" :options="categories" label="Rezeptkategorie" filled dark
-                    emit-value map-options clearable behavior="menu" class="custom-dark-input" hide-bottom-space />
+
+                  <div class="row no-wrap items-center q-gutter-x-sm">
+                    <q-select v-model="recipeData.category" :options="categories" label="Rezeptkategorie" filled dark
+                      emit-value map-options clearable behavior="menu" class="custom-dark-input col"
+                      hide-bottom-space />
+                    <q-btn flat round icon="add" color="primary" class="bg-dark-soft" @click="promptNewCategory">
+                      <q-tooltip class="bg-primary">Neue Kategorie erstellen</q-tooltip>
+                    </q-btn>
+                  </div>
+
                   <q-input v-model="uiRecipeAmount" label="Rezeptmenge" filled dark class="custom-dark-input"
                     hide-bottom-space clearable />
                   <q-input v-model="recipeData.ovensettings" label="Ofeneinstellung" filled dark
@@ -1201,7 +1256,7 @@ const resolveIngredientDetailsForSteps = async () => {
                   <div class="row items-center q-gutter-sm">
                     <q-chip v-for="(stepIng, ingIndex) in step.ingredients" :key="ingIndex" removable
                       @remove="removeIngredientFromStep(index, ingIndex)" color="primary" text-color="white"
-                      class="q-ma-none custom-chip">
+                      class="custom-chip">
                       <q-avatar v-if="stepIng.image"><img :src="stepIng.image"></q-avatar>
                       <q-avatar v-else icon="restaurant" />
 

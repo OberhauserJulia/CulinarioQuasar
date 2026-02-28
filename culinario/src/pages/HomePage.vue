@@ -46,6 +46,36 @@ const activeCategories = computed(() => {
   })).sort((a, b) => a.label.localeCompare(b.label));
 });
 
+const pickSurpriseRecipe = () => {
+  // Wir nehmen die gefilterten Rezepte, falls Filter aktiv sind, sonst alle.
+  const sourceList = filteredRecipes.value.length > 0 ? filteredRecipes.value : recipes.value;
+
+  if (sourceList.length === 0) {
+    $q.notify({
+      type: 'warning',
+      message: 'Keine Rezepte zum Auslosen vorhanden.',
+      position: 'top'
+    });
+    return;
+  }
+
+  const randomIndex = Math.floor(Math.random() * sourceList.length);
+  const randomRecipe = sourceList[randomIndex];
+
+  // FIX: Wir prüfen erst, ob randomRecipe existiert UND ob es eine ID hat
+  if (randomRecipe && randomRecipe.id) {
+    $q.notify({
+      type: 'positive',
+      message: `Heute gibt es: ${randomRecipe.name}! 🎲`,
+      icon: 'casino',
+      color: 'primary',
+      timeout: 2000
+    });
+
+    void router.push(`/recipe/${randomRecipe.id}`);
+  }
+};
+
 const allIngredients = computed(() => {
   const usedIngredientIds = new Set<string>();
 
@@ -185,6 +215,11 @@ const performDelete = async (recipe: RecipeFirebase) => {
         <h1 class="text-h4 text-weight-bold q-my-none text-white gt-sm">Meine Rezepte</h1>
 
         <div class="row no-wrap items-center q-gutter-sm search-wrapper">
+          <q-btn unelevated class="bg-dark border-dark hover-primary" icon="casino" text-color="white"
+            @click="pickSurpriseRecipe" style="height: 49px; width: 49px; border-radius: 14px;">
+            <q-tooltip class="bg-primary text-white text-weight-bold">Überrasch mich!</q-tooltip>
+          </q-btn>
+
           <q-input v-model="searchQuery" borderless dense placeholder="Rezept suchen..."
             class="col search-input bg-dark" input-class="text-white">
             <template v-slot:prepend>

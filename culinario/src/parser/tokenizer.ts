@@ -7,7 +7,7 @@ export function tokenize(text: string, excludeSpaces: boolean = true): string[] 
 
   // Das Minus (-) steht jetzt ganz am Ende, so braucht es kein Escape-Zeichen mehr.
   // Der Slash (/) muss im Regex-Literal escaped werden (\/).
-  const rawTokens = processedText.split(/([ ,\/()-])/).filter(t => t !== '');
+  const rawTokens = processedText.split(/([ ,/()-])/).filter(t => t !== '');
 
   if (excludeSpaces) {
     return rawTokens.filter(t => t.trim() !== '');

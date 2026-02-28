@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onUnmounted } from 'vue';
 import { collection, getDocs } from 'firebase/firestore';
-import { db } from '../firebase/index';
+import { db, auth } from '../firebase/index';
 import { useQuasar } from 'quasar';
 import { parseIngredient } from '../parser/ingredientParser';
 
@@ -13,7 +13,8 @@ import {
   subscribeToShoppingList,
   updateShoppingListItem,
   deleteShoppingListItem,
-  addShoppingListItem
+  addShoppingListItem,
+  getGroupMemberSettings
 } from '../firebase/services';
 
 interface DisplayItem extends ShoppingListFirebase {
@@ -35,12 +36,14 @@ const ingredientsMap = ref<Record<string, string>>({});
 const allIngredients = ref<IngredientFirebase[]>([]);
 const showMenu = ref(false);
 const suggestions = ref<IngredientFirebase[]>([]);
+const memberSettings = ref<Record<string, { shareShoppingList: boolean }>>({});
 
 let unsubscribeShoppingList: (() => void) | null = null;
 
 onMounted(async () => {
   try {
     const ings = await getIngredients();
+    memberSettings.value = await getGroupMemberSettings();
     const tempMap: Record<string, string> = {};
 
     ings.forEach(ing => {
@@ -139,8 +142,11 @@ const saveEditItem = async () => {
       // 2. Fallback: Falls die Einheit komplett "unbekannt" ist (z.B. "2 Kisten")
       // und der Parser sie deshalb ignoriert hat:
       if (!newUnit) {
-        const match = val.match(/^([\d.,\/]+)\s*(.*)$/);
-        if (match) {
+        // Regex korrigiert: \/ wurde zu /
+        const match = val.match(/^([\d.,/]+)\s*(.*)$/);
+
+        // Match-Check erweitert: Wir prüfen, ob match[2] definiert ist
+        if (match && match[2] !== undefined) {
           newUnit = match[2].trim();
         } else {
           newUnit = val; // Wenn nur Text getippt wurde (z.B. "Viel")
@@ -163,6 +169,7 @@ const saveEditItem = async () => {
     showEditDialog.value = false;
     $q.notify({ type: 'positive', message: 'Artikel aktualisiert' });
   } catch (e) {
+    console.error("Fehler beim Speichern:", e);
     $q.notify({ type: 'negative', message: 'Fehler beim Speichern' });
   } finally {
     isProcessing.value = false;
@@ -170,24 +177,38 @@ const saveEditItem = async () => {
 };
 
 const displayItems = computed<DisplayItem[]>(() => {
-  return shoppingItems.value.map(item => {
-    // 1. KUGELSICHERER ID-CHECK: Egal wie alt der Datenbankeintrag ist, wir finden die ID!
-    const safeId = item.ingredientid || (item as any).ingredientId || (item as any).ingredientID;
+  const myUid = auth.currentUser?.uid;
 
-    // 2. Original-Zutat in der Datenbank suchen
-    const ingredient = safeId ? allIngredients.value.find(i => i.id === safeId) : null;
+  return shoppingItems.value
+    .filter(item => {
+      // PRIVATSPHÄRE-FILTER ohne 'any'
+      // Wir casten das Item auf den Typ plus das optionale authorId Feld
+      const itemWithAuthor = item as ShoppingListFirebase & { authorId?: string };
+      const authorId = itemWithAuthor.authorId;
 
-    // 3. Bild & Name zuweisen (Eigenes > Datenbank > Leer/Unbekannt)
-    const finalImage = item.customImage ? item.customImage : (ingredient?.image || '');
-    const finalName = item.customName ? item.customName : (ingredient?.name || 'Unbekannter Artikel');
+      const isAllowed = !authorId ||
+        authorId === myUid ||
+        (memberSettings.value[authorId]?.shareShoppingList !== false);
 
-    return {
-      ...item,
-      ingredientid: safeId || '', // Wir machen die ID für die weitere App einheitlich
-      name: finalName,
-      image: finalImage
-    };
-  });
+      return isAllowed;
+    })
+    .map(item => {
+      // ID-CHECK ohne 'any'
+      // Wir casten auf die möglichen Schreibweisen aus der Datenbank
+      const legacyItem = item as ShoppingListFirebase & { ingredientId?: string; ingredientID?: string };
+      const safeId = item.ingredientid || legacyItem.ingredientId || legacyItem.ingredientID;
+
+      const ingredient = safeId ? allIngredients.value.find(i => i.id === safeId) : null;
+      const finalImage = item.customImage ? item.customImage : (ingredient?.image || '');
+      const finalName = item.customName ? item.customName : (ingredient?.name || 'Unbekannter Artikel');
+
+      return {
+        ...item,
+        ingredientid: safeId || '',
+        name: finalName,
+        image: finalImage
+      };
+    });
 });
 
 const groupedItems = computed(() => {
@@ -497,7 +518,7 @@ const handleEnter = async () => {
                 <q-item-label class="text-weight-bold item-name text-body1">{{ item.name }}</q-item-label>
                 <q-item-label caption class="text-grey-5 item-amount" v-if="item.amount > 0">{{ item.amount }} {{
                   item.unit
-                  }}</q-item-label>
+                }}</q-item-label>
               </q-item-section>
               <q-item-section side>
                 <div class="row items-center no-wrap">

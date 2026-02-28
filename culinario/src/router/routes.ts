@@ -2,8 +2,14 @@ import type { RouteRecordRaw } from 'vue-router';
 
 const routes: RouteRecordRaw[] = [
   {
+    path: '/login',
+    component: () => import('pages/LoginPage.vue'),
+    meta: { requiresAuth: false }
+  },
+  {
     path: '/',
     component: () => import('layouts/MainLayout.vue'),
+    meta: { requiresAuth: true },
     children: [
       { path: '', component: () => import('pages/HomePage.vue') },
       { path: 'add-recipe', component: () => import('pages/AddRecipePage.vue') },
@@ -12,7 +18,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'shopping-list', component: () => import('pages/ShoppingListPage.vue') },
       { path: 'settings', component: () => import('pages/SettingsPage.vue') }
     ],
-  },
+  }
 ];
 
 export default routes;

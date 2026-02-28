@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { date, useQuasar } from 'quasar';
-
+import { auth } from '../firebase/index';
 // 1. Zentrale Typen
 import type { RecipeFirebase, ShoppingList } from '../types/index';
 
@@ -13,16 +13,24 @@ import {
   addRecipeToMealPlan,
   removeRecipeFromMealPlan,
   getShoppingList,
-  batchUpdateShoppingList
+  batchUpdateShoppingList,
+  getGroupMembers,
+  getGroupMemberSettings
 } from '../firebase/services';
+
+type MealPlanEntry = string | { recipeId: string; cookId: string };
 
 const $q = useQuasar();
 const router = useRouter();
 
+const groupMembers = ref<{ id: string, name: string }[]>([]);
+const selectedCookId = ref(auth.currentUser?.uid || '');
+const memberSettings = ref<Record<string, { shareMealPlan: boolean }>>({});
+
 const currentAnchorDate = ref(new Date());
 // Streng typisiert
 const allRecipes = ref<RecipeFirebase[]>([]);
-const mealPlans = ref<Record<string, { recipes: string[] }>>({});
+const mealPlans = ref<Record<string, { recipes: MealPlanEntry[] }>>({});
 const isAddingToCart = ref(false);
 
 // Picker State
@@ -36,6 +44,7 @@ onMounted(async () => {
     // 3. Sauber über den Service laden
     allRecipes.value = await getRecipes();
     mealPlans.value = await getMealPlans();
+    memberSettings.value = await getGroupMemberSettings();
   } catch (error: unknown) {
     console.error("Fehler beim Laden des Wochenplans:", error);
     $q.notify({ type: 'negative', message: 'Fehler beim Laden der Daten.' });
@@ -47,7 +56,6 @@ const weekDays = computed(() => {
   const days = [];
   const todayStart = date.startOfDate(currentAnchorDate.value, 'day');
 
-  // Woche startet am Montag (0 = So, 1 = Mo ...)
   const dayOfWeek = date.getDayOfWeek(todayStart);
   const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   const start = date.subtractFromDate(todayStart, { days: daysSinceMonday });
@@ -55,7 +63,7 @@ const weekDays = computed(() => {
   for (let i = 0; i < 7; i++) {
     const d = date.addToDate(start, { days: i });
     const dStr = date.formatDate(d, 'YYYY-MM-DD');
-    const recipeIds = mealPlans.value[dStr]?.recipes || [];
+    const rawEntries = mealPlans.value[dStr]?.recipes || [];
 
     days.push({
       dateString: dStr,
@@ -64,8 +72,23 @@ const weekDays = computed(() => {
         days: ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag']
       }),
       isToday: dStr === date.formatDate(new Date(), 'YYYY-MM-DD'),
-      // Mappen der IDs direkt auf die strikt typisierten Rezept-Objekte
-      plannedRecipes: recipeIds.map((id: string) => allRecipes.value.find(r => r.id === id)).filter(Boolean) as RecipeFirebase[]
+
+      // HIER FINDET DIE FILTERUNG STATT:
+      plannedRecipes: rawEntries.map((entry: MealPlanEntry) => {
+        const rId = typeof entry === 'string' ? entry : entry.recipeId;
+        const cId = typeof entry === 'string' ? '' : entry.cookId;
+
+        // 1. Eigene Einträge (cId === meinUid) immer anzeigen
+        // 2. Einträge von anderen nur anzeigen, wenn shareMealPlan true ist
+        const myUid = auth.currentUser?.uid;
+        const isMe = cId === myUid;
+        const isShared = memberSettings.value[cId]?.shareMealPlan !== false;
+
+        if (!isMe && !isShared) return null;
+
+        const rData = allRecipes.value.find(r => r.id === rId);
+        return rData ? { ...rData, cookId: cId } : null;
+      }).filter((r): r is (RecipeFirebase & { cookId: string }) => r !== null)
     });
   }
   return days;
@@ -101,35 +124,58 @@ const filteredRecipesForPicker = computed(() => {
   return allRecipes.value.filter(r => r.name?.toLowerCase().includes(search));
 });
 
+onMounted(async () => {
+  try {
+    allRecipes.value = await getRecipes();
+    const rawPlans = await getMealPlans();
+
+    mealPlans.value = rawPlans;
+    groupMembers.value = await getGroupMembers();
+  } catch (error: unknown) {
+    console.error("Fehler beim Laden:", error);
+  }
+});
+
+// Update die addRecipeToPlan Funktion:
 const addRecipeToPlan = async (recipe: RecipeFirebase) => {
   if (!recipe.id) return;
   const dStr = activeDateString.value;
+  const cookId = selectedCookId.value;
 
   try {
-    // 4. Update über Service
-    await addRecipeToMealPlan(dStr, recipe.id);
+    await addRecipeToMealPlan(dStr, recipe.id, cookId);
 
-    // Lokal updaten für Instant-Feedback
     if (!mealPlans.value[dStr]) mealPlans.value[dStr] = { recipes: [] };
-    mealPlans.value[dStr].recipes.push(recipe.id);
+
+    // Ohne 'any', da mealPlans jetzt MealPlanEntry[] erwartet
+    mealPlans.value[dStr].recipes.push({ recipeId: recipe.id, cookId: cookId });
 
     showPicker.value = false;
-    $q.notify({ type: 'positive', message: 'Rezept geplant!', timeout: 1000 });
-  } catch (e: unknown) {
-    console.error("Fehler beim Hinzufügen zum Plan:", e);
-    $q.notify({ type: 'negative', message: 'Fehler beim Speichern.' });
-  }
+    $q.notify({ type: 'positive', message: 'Geplant!', timeout: 1000 });
+  } catch (e) { console.error(e); }
+};
+
+// Hilfsfunktion, um den Namen des Koches zu finden
+const getCookName = (userId: string) => {
+  if (userId === auth.currentUser?.uid) return 'Ich';
+  const user = groupMembers.value.find(m => m.id === userId);
+  return user ? user.name : 'Jemand';
 };
 
 const removeRecipeFromDay = async (dateStr: string, recipeId: string) => {
   try {
-    // 5. Löschen über Service
+    // 1. Löschen über den Service in der Datenbank
     await removeRecipeFromMealPlan(dateStr, recipeId);
 
-    // Lokal entfernen
+    // 2. Lokal aus dem State entfernen
     if (mealPlans.value[dateStr]) {
-      mealPlans.value[dateStr].recipes = mealPlans.value[dateStr].recipes.filter((id: string) => id !== recipeId);
+      // Wir müssen prüfen, welcher Teil des Eintrags die ID enthält
+      mealPlans.value[dateStr].recipes = mealPlans.value[dateStr].recipes.filter((entry: MealPlanEntry) => {
+        const currentId = typeof entry === 'string' ? entry : entry.recipeId;
+        return currentId !== recipeId;
+      });
     }
+
     $q.notify({ type: 'info', message: 'Rezept entfernt.', timeout: 1000 });
   } catch (e: unknown) {
     console.error("Fehler beim Entfernen:", e);
@@ -297,6 +343,10 @@ const addWeekToCart = async () => {
 
                   <div class="col q-px-md overflow-hidden">
                     <div class="text-body2 text-weight-bold ellipsis-2-lines">{{ recipe.name }}</div>
+                    <div class="text-caption text-primary row items-center" v-if="recipe.cookId">
+                      <q-icon name="person" size="xs" class="q-mr-xs" />
+                      {{ getCookName(recipe.cookId) }}
+                    </div>
                   </div>
 
                   <q-btn flat dense round icon="close" size="sm" color="grey-5" class="q-mr-sm hover-negative"
@@ -319,11 +369,13 @@ const addWeekToCart = async () => {
           </q-card-section>
 
           <q-card-section class="q-pt-md">
+            <div class="text-caption text-grey-5 q-mb-xs">Wer kocht?</div>
+            <q-select v-model="selectedCookId" :options="groupMembers" option-value="id" option-label="name" emit-value
+              map-options filled dark dense class="custom-dark-input q-mb-md" />
+
             <q-input v-model="pickerSearch" dense filled dark placeholder="Rezept suchen..." autofocus
               class="custom-dark-input">
-              <template v-slot:append>
-                <q-icon name="search" color="grey-5" />
-              </template>
+              <template v-slot:append><q-icon name="search" color="grey-5" /></template>
             </q-input>
           </q-card-section>
 

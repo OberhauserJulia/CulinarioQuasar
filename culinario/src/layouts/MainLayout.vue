@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useRoute } from 'vue-router';
+import { initializeUserGroup } from '../firebase/services';
 
 const $q = useQuasar();
 const route = useRoute();
+
+const isReady = ref(false);
 
 const navLinks = [
   { label: 'Rezepte', icon: 'menu_book', to: '/', exact: true },
@@ -20,14 +23,32 @@ const isMiniMode = computed(() => {
   return $q.screen.sm || route.path.startsWith('/recipe/');
 });
 
+onMounted(async () => {
+  const storedTheme = localStorage.getItem('darkMode');
+  if (storedTheme !== null) {
+    $q.dark.set(storedTheme === 'true');
+  } else {
+
+    $q.dark.set(true);
+  }
+
+  // Deine bestehende Logik
+  try {
+    await initializeUserGroup();
+  } finally {
+    isReady.value = true;
+  }
+});
+
 </script>
 
 <template>
   <q-layout view="hHh LpR lFf" class="bg-dark-page text-white">
 
-    <q-drawer v-model="leftDrawerOpen" show-if-above :mini="isMiniMode" :width="260" :breakpoint="599"
+    <q-drawer v-model="leftDrawerOpen" show-if-above :mini="isMiniMode" :width="260" :mini-width="90" :breakpoint="599"
       class="bg-sidebar border-right gt-xs">
-      <div class="row items-center q-py-lg q-px-md" :class="isMiniMode ? 'justify-center' : 'justify-start'">
+      <div class="row items-center q-py-lg q-px-md" :class="isMiniMode ? 'justify-center' : 'justify-start'"
+        style="border-bottom: 1.5px solid #333333 !important;">
         <q-avatar size="42px" color="primary" text-color="white" class="shadow-4">
           <q-icon name="restaurant_menu" size="sm" />
         </q-avatar>
@@ -66,7 +87,11 @@ const isMiniMode = computed(() => {
     </q-drawer>
 
     <q-page-container>
-      <router-view />
+      <router-view v-if="isReady" />
+
+      <div v-else class="flex flex-center" style="height: 80vh;">
+        <q-spinner-dots color="primary" size="3em" />
+      </div>
     </q-page-container>
 
     <q-footer class="bg-sidebar border-top lt-sm" style="padding-bottom: env(safe-area-inset-bottom);">
@@ -146,5 +171,11 @@ const isMiniMode = computed(() => {
 :deep(.q-tab--active .q-icon) {
   transform: scale(1.1);
   transition: transform 0.2s ease;
+}
+
+:deep(.q-drawer__content) {
+  overflow: hidden !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
 </style>

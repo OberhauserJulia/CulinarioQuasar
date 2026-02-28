@@ -635,8 +635,7 @@ onMounted(async () => {
           <q-img :src="r.image || 'placeholder.jpg'" :ratio="16 / 9" class="sidebar-recipe-image" />
 
           <q-card-section class="q-py-sm text-center bg-dark">
-            <div class="text-subtitle2 text-weight-bolder ellipsis"
-              :class="{ 'text-primary': r.id === route.params.id }">
+            <div class="text-subtitle2 text-weight-bolder ellipsis" :class="{ 'text-white': r.id === route.params.id }">
               {{ r.name }}
             </div>
           </q-card-section>
@@ -667,15 +666,12 @@ onMounted(async () => {
                   <q-list>
                     <q-item clickable :to="`/add-recipe?edit=${route.params.id}`">
                       <q-item-section avatar><q-icon name="edit" /></q-item-section>
-                      <q-item-section>Bearbeiten</q-item-section>
                     </q-item>
                     <q-item clickable @click="exportRecipe">
                       <q-item-section avatar><q-icon name="picture_as_pdf" /></q-item-section>
-                      <q-item-section>Als PDF exportieren</q-item-section>
                     </q-item>
                     <q-item clickable @click="deleteRecipeDialog">
                       <q-item-section avatar><q-icon name="delete" color="red-4" /></q-item-section>
-                      <q-item-section class="text-red-4">Löschen</q-item-section>
                     </q-item>
                   </q-list>
                 </q-menu>
@@ -690,12 +686,11 @@ onMounted(async () => {
           <div class="row items-center justify-between q-mb-xl gt-sm sticky-desktop-header rounded-borders">
             <h1 class="text-h4 text-weight-bold q-my-none q-pl-md">{{ recipe.name }}</h1>
             <div class="row q-gutter-sm q-pr-md">
-              <q-btn flat icon="edit" label="Bearbeiten" color="grey-4" no-caps class="bg-dark-soft"
+              <q-btn flat icon="edit" color="grey-4" no-caps class="bg-dark-soft"
                 :to="`/add-recipe?edit=${route.params.id}`" />
-              <q-btn flat icon="picture_as_pdf" label="PDF" color="grey-4" no-caps class="bg-dark-soft"
-                @click="exportRecipe" />
-              <q-btn flat icon="shopping_cart" label="Einkaufen" color="primary" no-caps
-                class="bg-dark-soft text-weight-bold" @click="openShoppingListDialog" />
+              <q-btn flat icon="picture_as_pdf" color="grey-4" no-caps class="bg-dark-soft" @click="exportRecipe" />
+              <q-btn flat icon="shopping_cart" color="grey-4" no-caps class="bg-dark-soft text-weight-bold"
+                @click="openShoppingListDialog" />
             </div>
           </div>
 
@@ -906,15 +901,23 @@ onMounted(async () => {
   flex: 0 0 240px;
   min-width: 240px;
   max-width: 240px;
-
   position: sticky;
   top: 0;
   align-self: flex-start;
-
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
   height: 100vh;
-  overflow-y: auto;
-  overflow-x: hidden;
+
+  /* Scrollen deaktivieren */
+  overflow: hidden !important;
+
+  background-color: #1a1a1a;
+
+  /* Sichtbare Border nach rechts */
+  border-right: 1.5px solid #333333 !important;
+  border-left: 1.5px solid #333333 !important;
+}
+
+.recipe-sidebar::-webkit-scrollbar {
+  display: none !important;
 }
 
 .sticky-sidebar-header {

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
 import { useQuasar } from 'quasar';
-import { collection, getDocs, doc, deleteDoc } from 'firebase/firestore';
-import { db } from '../firebase/index';
+import { collection, getDocs, doc, deleteDoc, getDoc } from 'firebase/firestore';
+import { useRouter } from 'vue-router';
+import { db, auth } from '../firebase/index';
+import { signOut } from 'firebase/auth';
 
 // 1. Typen aus index.ts
 import type { IngredientFirebase, Markets, WithId, RecipeFirebase } from '../types/index';
@@ -16,11 +18,33 @@ import {
   updateMarket,
   deleteMarket,
   getRecipes,
-  updateRecipe
+  updateRecipe,
+  getWGInfo,
+  createWG,
+  joinWG,
+  leaveWG,
+  updateUserWGPrefs,
+  updateUserProfile,
+  updateUserPrefs
 } from '../firebase/services';
 
 const $q = useQuasar();
 const tab = ref('general');
+
+const keepScreenOn = ref(true);
+const timerSound = ref('classic');
+
+const router = useRouter();
+const handleLogout = async () => {
+  try {
+    await signOut(auth);
+    $q.notify({ type: 'info', message: 'Erfolgreich abgemeldet.' });
+    void router.push('/login');
+  } catch (error) {
+    console.error("Fehler beim Logout:", error);
+    $q.notify({ type: 'negative', message: 'Fehler beim Abmelden.' });
+  }
+};
 
 // --- ALLGEMEINE EINSTELLUNGEN ---
 const isDarkMode = ref($q.dark.isActive);
@@ -130,7 +154,7 @@ const allIngredientsOptions = computed(() => {
     .sort((a, b) => a.label.localeCompare(b.label));
 });
 
-const getIngredientIdHelper = (ing: any): string => {
+const getIngredientIdHelper = (ing: { ingredientID?: string; ingredientId?: string }): string => {
   return ing.ingredientID || ing.ingredientId || '';
 };
 
@@ -171,7 +195,7 @@ const executeDeleteAndSwap = async () => {
         const updatedRecipe = JSON.parse(JSON.stringify(recipe)) as RecipeFirebase;
 
         // In Zutatenliste austauschen
-        updatedRecipe.ingredients?.forEach((i: any) => {
+        updatedRecipe.ingredients?.forEach((i: { ingredientID?: string; ingredientId?: string }) => {
           if (getIngredientIdHelper(i) === oldId) {
             i.ingredientID = newId;
             if (i.ingredientId) i.ingredientId = newId; // Fallback überschreiben
@@ -179,8 +203,8 @@ const executeDeleteAndSwap = async () => {
         });
 
         // In Schritten austauschen
-        updatedRecipe.preparationSteps?.forEach((step: any) => {
-          step.ingredients?.forEach((i: any) => {
+        updatedRecipe.preparationSteps?.forEach((step: { ingredients?: { ingredientID?: string; ingredientId?: string }[] }) => {
+          step.ingredients?.forEach((i: { ingredientID?: string; ingredientId?: string }) => {
             if (getIngredientIdHelper(i) === oldId) {
               i.ingredientID = newId;
               if (i.ingredientId) i.ingredientId = newId;
@@ -274,7 +298,123 @@ const moveCategory = (index: number, direction: -1 | 1) => {
   if (itemA !== undefined && itemB !== undefined) { arr[index] = itemB; arr[newIndex] = itemA; }
 };
 
-onMounted(() => {
+// --- WG LOGIK ---
+const wgInfo = ref<{ id: string, name: string, code: string } | null>(null);
+const createWgName = ref('');
+const joinWgCode = ref('');
+const isWgProcessing = ref(false);
+const shareMealPlan = ref(true);
+const shareShoppingList = ref(true);
+const displayName = ref('');
+const unitPreference = ref('metric');
+
+const loadWgData = async () => {
+  wgInfo.value = await getWGInfo();
+
+  const userSnap = await getDoc(doc(db, 'users', auth.currentUser!.uid));
+  if (userSnap.exists()) {
+    const data = userSnap.data();
+    displayName.value = data.name || '';
+    unitPreference.value = data.unitPreference || 'metric';
+
+    keepScreenOn.value = data.keepScreenOn ?? true;
+    timerSound.value = data.timerSound || 'classic';
+
+    shareMealPlan.value = data.shareMealPlan ?? true;
+    shareShoppingList.value = data.shareShoppingList ?? true;
+  }
+};
+
+const updateProfileName = async () => {
+  if (!displayName.value.trim()) return;
+  try {
+    await updateUserProfile({ name: displayName.value.trim() });
+    $q.notify({ type: 'positive', message: 'Profilname aktualisiert!', timeout: 1000 });
+  } catch (e) {
+    console.error(e);
+    $q.notify({ type: 'negative', message: 'Fehler beim Speichern.' });
+  }
+};
+
+const handleCreateWG = async () => {
+  if (!createWgName.value.trim()) return;
+  isWgProcessing.value = true;
+  try {
+    await createWG(createWgName.value);
+    await loadWgData();
+    createWgName.value = '';
+    $q.notify({ type: 'positive', message: 'WG erfolgreich gegründet!' });
+  } catch (e) {
+    console.error("Fehler beim Gründen der WG:", e);
+    $q.notify({ type: 'negative', message: 'Fehler beim Gründen der WG.' });
+  } finally {
+    isWgProcessing.value = false;
+  }
+};
+
+const handleJoinWG = async () => {
+  if (!joinWgCode.value.trim()) return;
+  isWgProcessing.value = true;
+  try {
+    const wgName = await joinWG(joinWgCode.value);
+    await loadWgData();
+    joinWgCode.value = '';
+
+    // GANZ WICHTIG: Die App neu laden, damit alle Rezepte der neuen WG gezogen werden!
+    $q.notify({ type: 'positive', message: `Erfolgreich der WG "${wgName}" beigetreten!` });
+    setTimeout(() => { window.location.reload(); }, 1500);
+
+  } catch (e: unknown) { // <-- 'any' durch 'unknown' ersetzt
+    // Wir prüfen sauber, ob es ein echtes Error-Objekt ist
+    const errorMessage = e instanceof Error ? e.message : 'Fehler beim Beitritt.';
+    $q.notify({ type: 'negative', message: errorMessage });
+  } finally {
+    isWgProcessing.value = false;
+  }
+};
+
+const handleLeaveWG = () => {
+  $q.dialog({
+    title: 'WG verlassen',
+    message: 'Möchtest du diese WG wirklich verlassen? Du hast danach keinen Zugriff mehr auf diese Rezepte und den Wochenplan.',
+    cancel: true, persistent: true, color: 'negative'
+  }).onOk(() => {
+    void (async () => {
+      isWgProcessing.value = true;
+      try {
+        await leaveWG();
+        $q.notify({ type: 'info', message: 'WG verlassen.' });
+        setTimeout(() => { window.location.reload(); }, 1000);
+      } catch (e) {
+        console.error("Fehler beim Verlassen der WG:", e);
+        $q.notify({ type: 'negative', message: 'Fehler beim Verlassen.' });
+      } finally {
+        isWgProcessing.value = false;
+      }
+    })();
+  });
+};
+
+watch(keepScreenOn, async (val) => {
+  await updateUserPrefs({ keepScreenOn: val });
+});
+
+watch(timerSound, async (val) => {
+  await updateUserPrefs({ timerSound: val });
+});
+
+watch([shareMealPlan, shareShoppingList], async () => {
+  await updateUserWGPrefs({
+    shareMealPlan: shareMealPlan.value,
+    shareShoppingList: shareShoppingList.value
+  });
+});
+
+watch(unitPreference, async (newVal) => {
+  await updateUserPrefs({ unitPreference: newVal });
+});
+
+onMounted(async () => {
   const storedTheme = localStorage.getItem('darkMode');
   if (storedTheme !== null) isDarkMode.value = storedTheme === 'true';
   const storedPortions = localStorage.getItem('defaultPortions');
@@ -282,6 +422,7 @@ onMounted(() => {
 
   void loadGlobalData();
   void loadSupermarketsAndCategories();
+  await loadWgData();
 });
 </script>
 
@@ -301,6 +442,7 @@ onMounted(() => {
           </q-badge>
         </q-tab>
         <q-tab name="about" icon="info_outline" label="Info" no-caps class="text-weight-bold" />
+        <q-tab name="wg" icon="groups" label="Meine WG" no-caps class="text-weight-bold" />
       </q-tabs>
 
       <q-tab-panels v-model="tab" animated class="bg-transparent p-0">
@@ -338,7 +480,45 @@ onMounted(() => {
                   </div>
                 </q-item-section>
               </q-item>
+
+              <q-item class="q-py-lg">
+                <q-item-section avatar>
+                  <q-icon name="person" color="grey-5" size="md" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label class="text-weight-bold text-body1">Anzeigename</q-item-label>
+                  <q-item-label caption class="text-grey-5">Wie du in der WG erscheinst</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-input v-model="displayName" dense filled dark class="custom-dark-input" placeholder="Dein Name"
+                    @blur="updateProfileName" @keyup.enter="updateProfileName" style="width: 150px;" />
+                </q-item-section>
+              </q-item>
+
+              <q-item class="q-py-lg">
+                <q-item-section avatar>
+                  <q-icon name="straighten" color="grey-5" size="md" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label class="text-weight-bold text-body1">Maßeinheiten</q-item-label>
+                  <q-item-label caption class="text-grey-5">Bevorzugtes System beim KI-Import</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-select v-model="unitPreference" :options="[
+                    { label: 'Metrisch (g, ml, °C)', value: 'metric' },
+                    { label: 'Original (Cups, °F)', value: 'original' }
+                  ]" dense filled dark emit-value map-options class="custom-dark-input" style="width: 180px;" />
+                </q-item-section>
+              </q-item>
+
+              
             </q-list>
+
+            <q-separator class="separator-dark" />
+            <div class="q-pa-md">
+              <q-btn color="negative" icon="logout" label="Abmelden" class="full-width text-weight-bold" unelevated
+                no-caps style="border-radius: 8px;" @click="handleLogout" />
+            </div>
           </q-card>
         </q-tab-panel>
 
@@ -443,6 +623,89 @@ onMounted(() => {
               </q-item>
             </q-list>
           </q-card>
+        </q-tab-panel>
+
+        <q-tab-panel name="wg" class="q-pa-none">
+          <div class="text-h6 q-mb-md text-weight-bold">Familie & WG</div>
+
+          <q-card flat class="settings-card bg-dark border-dark q-pa-lg">
+
+            <div v-if="wgInfo" class="text-center">
+              <q-avatar size="80px" color="primary" text-color="white" class="q-mb-md shadow-4">
+                <q-icon name="diversity_3" size="xl" />
+              </q-avatar>
+              <h2 class="text-h4 text-weight-bold q-my-none">{{ wgInfo.name }}</h2>
+              <p class="text-grey-5 q-mt-sm">Du teilst Rezepte, Wochenpläne und Einkaufslisten mit dieser Gruppe.</p>
+
+              <div class="bg-dark-soft border-dark rounded-borders q-pa-md q-my-lg inline-block">
+                <div class="text-caption text-grey-5 text-uppercase letter-spacing-1 q-mb-xs">Einladungs-Code</div>
+                <div class="text-h4 text-weight-bolder text-primary letter-spacing-1">{{ wgInfo.code }}</div>
+              </div>
+
+              <div class="row justify-center q-mt-md">
+                <q-btn outline color="negative" icon="logout" label="WG verlassen" @click="handleLeaveWG"
+                  :loading="isWgProcessing" no-caps class="text-weight-bold" />
+              </div>
+            </div>
+
+            <div v-else>
+              <div class="text-center q-mb-xl">
+                <q-icon name="group_add" size="4em" color="grey-6" class="q-mb-md" />
+                <div class="text-h6 text-weight-bold">Du bist in keiner WG</div>
+                <p class="text-grey-5">Erstelle eine neue Gruppe oder trete einer bestehenden bei, um den Wochenplan und
+                  Rezepte zu teilen.</p>
+              </div>
+
+              <div class="row q-col-gutter-lg">
+                <div class="col-12 col-md-6">
+                  <div class="bg-dark-soft border-dark rounded-borders q-pa-md full-height">
+                    <div class="text-subtitle1 text-weight-bold q-mb-sm text-primary">WG gründen</div>
+                    <q-input v-model="createWgName" label="Name (z.B. Chaos-WG)" filled dark
+                      class="custom-dark-input q-mb-md" hide-bottom-space />
+                    <q-btn color="primary" label="Neue WG erstellen" @click="handleCreateWG" :loading="isWgProcessing"
+                      class="full-width text-weight-bold" unelevated no-caps />
+                  </div>
+                </div>
+
+                <div class="col-12 col-md-6">
+                  <div class="bg-dark-soft border-dark rounded-borders q-pa-md full-height">
+                    <div class="text-subtitle1 text-weight-bold q-mb-sm text-primary">WG beitreten</div>
+                    <q-input v-model="joinWgCode" label="6-stelliger Code" filled dark class="custom-dark-input q-mb-md"
+                      hide-bottom-space />
+                    <q-btn outline color="primary" label="Beitreten" @click="handleJoinWG" :loading="isWgProcessing"
+                      class="full-width text-weight-bold" no-caps />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </q-card>
+
+          <q-separator dark class="q-my-lg" />
+          <div class="text-subtitle1 text-weight-bold q-mb-md text-primary">WG-Berechtigungen</div>
+          <div class="bg-dark-soft border-dark rounded-borders q-pa-sm">
+            <q-list dark>
+              <q-item tag="label" v-ripple>
+                <q-item-section>
+                  <q-item-label>Meinen Wochenplan teilen</q-item-label>
+                  <q-item-label caption>Andere sehen, was du diese Woche kochst</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-toggle v-model="shareMealPlan" color="primary" />
+                </q-item-section>
+              </q-item>
+
+              <q-item tag="label" v-ripple>
+                <q-item-section>
+                  <q-item-label>Meine Einkaufsliste teilen</q-item-label>
+                  <q-item-label caption>Deine Artikel erscheinen auf der WG-Liste</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-toggle v-model="shareShoppingList" color="primary" />
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
         </q-tab-panel>
 
         <q-tab-panel name="about" class="q-pa-none">
