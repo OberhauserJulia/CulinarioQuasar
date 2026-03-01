@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { useQuasar } from 'quasar';
+import { useQuasar, setCssVar } from 'quasar';
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword
@@ -15,6 +15,10 @@ const isLogin = ref(true); // Toggle zwischen Login und Registrierung
 const email = ref('');
 const password = ref('');
 const isLoading = ref(false);
+
+onMounted(() => {
+  setCssVar('primary', '#66a182');
+});
 
 const handleSubmit = async () => {
   if (!email.value || !password.value) {
@@ -125,5 +129,55 @@ const handleSubmit = async () => {
 
 .hover-primary:hover {
   color: #66a182 !important;
+}
+
+/* ===================================================
+   GLOBALE THEME-KLASSEN (Wie im Layout)
+   =================================================== */
+:global(.body--dark) .dynamic-card {
+  background-color: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+:global(.body--light) .dynamic-card {
+  background-color: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+:global(.body--dark) .dynamic-text-muted {
+  color: #9e9e9e;
+}
+
+:global(.body--light) .dynamic-text-muted {
+  color: #757575;
+}
+
+.max-width-container {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.rounded-xl {
+  border-radius: 20px;
+}
+
+/* Hover-Effekte nutzen jetzt die dynamische Quasar-Variable! */
+.card-hover {
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.card-hover:hover {
+  border-color: var(--q-primary) !important;
+  transform: translateY(-2px);
+}
+
+.color-picker-btn {
+  border: 2px solid transparent;
+  transition: transform 0.2s;
+}
+
+.color-picker-btn:hover {
+  transform: scale(1.15);
+  border-color: var(--q-primary);
 }
 </style>

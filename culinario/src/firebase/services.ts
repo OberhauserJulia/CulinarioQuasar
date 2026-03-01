@@ -13,41 +13,45 @@ import type {
 } from '../types/index';
 
 // ==========================================
-// WG-MANAGEMENT & GRUPPEN-ID
+// 1. NUTZER & PROFILE (User & Settings)
 // ==========================================
 
-// Wir cachen die ID, damit wir nicht bei jedem Klick die Datenbank fragen müssen
+// Cache für die Gruppen-ID zur Performance-Optimierung
 let cachedGroupId: string | null = null;
 
 export const initializeUserGroup = async (): Promise<void> => {
   const user = auth.currentUser;
   if (!user) return;
 
-  // Schauen, ob der Nutzer schon ein Profil hat
   const userSnap = await getDoc(doc(db, 'users', user.uid));
   if (userSnap.exists() && userSnap.data().groupId) {
     cachedGroupId = userSnap.data().groupId;
   } else {
-    // Erster Login! Wir erstellen ein Profil und er ist seine eigene "Solo-WG"
+    // Erster Login: Profil erstellen und Solo-WG zuweisen
     cachedGroupId = user.uid;
     await setDoc(doc(db, 'users', user.uid), {
       groupId: user.uid,
-      email: user.email
+      email: user.email,
+      name: user.displayName || ''
     });
   }
 };
 
+/** Aktualisiert beliebige Felder im Nutzerprofil (Name, Einheiten, Kochmodus etc.) */
 export const updateUserPrefs = async (prefs: Record<string, any>) => {
   const uid = auth.currentUser?.uid;
   if (!uid) return;
   await updateDoc(doc(db, 'users', uid), prefs);
 };
 
+/** Veraltet: Nutze updateUserPrefs für alle Profil-Updates */
 export const updateUserProfile = async (data: { name: string }) => {
-  const uid = auth.currentUser?.uid;
-  if (!uid) return;
-  // Wir aktualisieren das Dokument in der 'users' Kollektion
-  await updateDoc(doc(db, 'users', uid), data);
+  await updateUserPrefs(data);
+};
+
+/** Speziell für die WG-Berechtigungen (Abwärtskompatibilität) */
+export const updateUserWGPrefs = async (prefs: { shareMealPlan: boolean, shareShoppingList: boolean }) => {
+  await updateUserPrefs(prefs);
 };
 
 export const getGroupMemberSettings = async (): Promise<Record<string, { shareMealPlan: boolean, shareShoppingList: boolean }>> => {
@@ -66,17 +70,30 @@ export const getGroupMemberSettings = async (): Promise<Record<string, { shareMe
   return settings;
 };
 
+export const deleteUserAccount = async () => {
+  const user = auth.currentUser;
+  if (!user) return;
+  // Profildaten in Firestore löschen
+  await deleteDoc(doc(db, 'users', user.uid));
+  // Authentifizierung löschen (erfordert ggf. frischen Login)
+  await user.delete();
+};
+
+// ==========================================
+// 2. WG-MANAGEMENT (Groups)
+// ==========================================
+
 export const getGroupId = (): string => {
   if (cachedGroupId) return cachedGroupId;
   const user = auth.currentUser;
   if (!user) throw new Error("Nicht eingeloggt!");
-  return user.uid; // Fallback
+  return user.uid;
 };
 
 export const getWGInfo = async () => {
   const gid = getGroupId();
   const user = auth.currentUser;
-  if (!user || gid === user.uid) return null; // Wenn groupId == uid, ist er in keiner WG
+  if (!user || gid === user.uid) return null;
 
   const groupSnap = await getDoc(doc(db, 'groups', gid));
   if (groupSnap.exists()) {
@@ -89,9 +106,7 @@ export const createWG = async (name: string): Promise<void> => {
   const user = auth.currentUser;
   if (!user) return;
 
-  // 6-stelligen Code generieren (z.B. A7X9P2)
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-
   const newGroupRef = await addDoc(collection(db, 'groups'), {
     name,
     code,
@@ -109,7 +124,7 @@ export const joinWG = async (code: string): Promise<string> => {
   const q = query(collection(db, 'groups'), where('code', '==', code.toUpperCase()));
   const snap = await getDocs(q);
 
-  if (snap.empty || !snap.docs[0]) { // Sicherheits-Check hinzugefügt
+  if (snap.empty || !snap.docs[0]) {
     throw new Error("Code ungültig oder WG existiert nicht.");
   }
 
@@ -121,7 +136,7 @@ export const joinWG = async (code: string): Promise<string> => {
   cachedGroupId = groupId;
   await updateDoc(doc(db, 'users', user.uid), { groupId });
 
-  return (groupDoc.data() as { name: string }).name; // Typ-Cast für den Namen
+  return (groupDoc.data() as { name: string }).name;
 };
 
 export const leaveWG = async (): Promise<void> => {
@@ -129,11 +144,9 @@ export const leaveWG = async (): Promise<void> => {
   if (!user) return;
   const oldGroupId = cachedGroupId;
 
-  // Zurück in die Solo-WG
   cachedGroupId = user.uid;
   await updateDoc(doc(db, 'users', user.uid), { groupId: user.uid });
 
-  // Aus der alten Gruppe austragen
   if (oldGroupId && oldGroupId !== user.uid) {
     await updateDoc(doc(db, 'groups', oldGroupId), { members: arrayRemove(user.uid) });
   }
@@ -146,46 +159,77 @@ export const getGroupMembers = async (): Promise<{ id: string, name: string, ema
 
   return snap.docs.map(d => ({
     id: d.id,
-    name: d.data().name || d.data().email.split('@')[0], // Fallback auf E-Mail Name
+    name: d.data().name || d.data().email.split('@')[0],
     email: d.data().email
   }));
 };
 
+// ==========================================
+// 3. DATEN-MANAGEMENT (Backup & Export)
+// ==========================================
+
+/** Exportiert alle Rezepte der aktuellen WG als JSON-Datei */
+export const exportRecipeData = async () => {
+  const recipes = await getRecipes();
+  const dataStr = JSON.stringify(recipes, null, 2);
+  const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+
+  const linkElement = document.createElement('a');
+  linkElement.setAttribute('href', dataUri);
+  linkElement.setAttribute('download', 'culinario_backup.json');
+  linkElement.click();
+};
 
 // ==========================================
-// REZEPTE (Recipes)
+// 4. REZEPTE (Recipes)
 // ==========================================
 
 export const getRecipes = async (): Promise<RecipeFirebase[]> => {
   const gid = getGroupId();
   const uid = auth.currentUser?.uid;
 
-  // Wir kapseln alles in ein and(), damit die Typen für TypeScript eindeutig sind
-  const q = query(
-    collection(db, 'recipes'),
-    and(
+  if (!uid) return [];
+
+  try {
+    // 1. Hole ALLE deine eigenen Rezepte (egal aus welcher WG oder aus der Zeit davor)
+    const myRecipesQuery = query(
+      collection(db, 'recipes'),
+      where('authorId', '==', uid)
+    );
+
+    // 2. Hole ALLE öffentlichen Rezepte, die andere in deiner aktuellen WG erstellt haben
+    const groupRecipesQuery = query(
+      collection(db, 'recipes'),
       where('groupId', '==', gid),
-      or(
-        where('visibility', '==', 'public'),
-        where('authorId', '==', uid)
-      )
-    )
-  );
+      where('visibility', '==', 'public')
+    );
 
-  const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() } as RecipeFirebase));
-};
+    // Beide Abfragen parallel ausführen für maximale Geschwindigkeit
+    const [mySnap, groupSnap] = await Promise.all([
+      getDocs(myRecipesQuery),
+      getDocs(groupRecipesQuery)
+    ]);
 
-export const addRecipeCategory = async (name: string): Promise<string> => {
-  const docRef = await addDoc(collection(db, 'recipeCategory'), {
-    name,
-    groupId: getGroupId() // Damit Kategorien innerhalb der WG geteilt werden
-  });
-  return docRef.id;
-};
+    // Eine Map verhindert, dass Rezepte doppelt angezeigt werden
+    const recipesMap = new Map<string, RecipeFirebase>();
 
-export const deleteRecipe = async (id: string): Promise<void> => {
-  await deleteDoc(doc(db, 'recipes', id));
+    // Eigene Rezepte eintragen
+    mySnap.docs.forEach(d => {
+      recipesMap.set(d.id, { id: d.id, ...d.data() } as RecipeFirebase);
+    });
+
+    // WG Rezepte dazupacken (falls sie nicht schon drin sind)
+    groupSnap.docs.forEach(d => {
+      if (!recipesMap.has(d.id)) {
+        recipesMap.set(d.id, { id: d.id, ...d.data() } as RecipeFirebase);
+      }
+    });
+
+    return Array.from(recipesMap.values());
+  } catch (error) {
+    console.error("Fehler beim Laden der Rezepte:", error);
+    return [];
+  }
 };
 
 export const getRecipeById = async (id: string): Promise<RecipeFirebase | null> => {
@@ -196,13 +240,10 @@ export const getRecipeById = async (id: string): Promise<RecipeFirebase | null> 
 
 export const addRecipe = async (data: Recipe): Promise<string> => {
   const uid = auth.currentUser?.uid;
-
-  // Wir erstellen ein temporäres Objekt mit dem richtigen Typ statt 'any'
   const recipeToSave = {
     ...data,
     groupId: getGroupId(),
     authorId: uid,
-    // Wir prüfen, ob im data-Objekt eine Sichtbarkeit steckt, sonst 'public'
     visibility: (data as Recipe & { visibility?: string }).visibility || 'public'
   };
 
@@ -210,9 +251,38 @@ export const addRecipe = async (data: Recipe): Promise<string> => {
   return docRef.id;
 };
 
+export const updateRecipe = async (id: string, data: Partial<Recipe>): Promise<void> => {
+  await updateDoc(doc(db, 'recipes', id), data);
+};
+
+export const deleteRecipe = async (id: string): Promise<void> => {
+  await deleteDoc(doc(db, 'recipes', id));
+};
+
+export const getRecipeCategories = async (): Promise<RecipeCategoryFirebase[]> => {
+  const gid = getGroupId();
+  const q = query(
+    collection(db, 'recipeCategory'),
+    or(
+      where('groupId', '==', gid),
+      where('groupId', '==', 'system')
+    )
+  );
+
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as RecipeCategoryFirebase));
+};
+
+export const addRecipeCategory = async (name: string): Promise<string> => {
+  const docRef = await addDoc(collection(db, 'recipeCategory'), {
+    name,
+    groupId: getGroupId()
+  });
+  return docRef.id;
+};
 
 // ==========================================
-// ZUTATEN & KATEGORIEN (Global für alle)
+// 5. ZUTATEN (Ingredients)
 // ==========================================
 
 export const getIngredients = async (): Promise<IngredientFirebase[]> => {
@@ -243,18 +313,8 @@ export const updateIngredient = async (id: string, data: Partial<Ingredient>): P
   await updateDoc(doc(db, 'ingredients', id), data);
 };
 
-export const updateRecipe = async (id: string, data: Partial<Recipe>): Promise<void> => {
-  await updateDoc(doc(db, 'recipes', id), data);
-};
-
-export const getRecipeCategories = async (): Promise<RecipeCategoryFirebase[]> => {
-  const snap = await getDocs(collection(db, 'recipeCategory'));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() } as RecipeCategoryFirebase));
-};
-
-
 // ==========================================
-// SUPERMÄRKTE (Markets)
+// 6. SUPERMÄRKTE (Markets)
 // ==========================================
 
 export const getMarkets = async (): Promise<WithId<Markets>[]> => {
@@ -276,12 +336,10 @@ export const deleteMarket = async (id: string): Promise<void> => {
   await deleteDoc(doc(db, 'supermarkets', id));
 };
 
-
 // ==========================================
-// MEAL PLAN (Wochenplan)
+// 7. WOCHENPLAN (Meal Plan)
 // ==========================================
 
-// NEU: Damit WGs nicht die Pläne von anderen überschreiben, kleben wir die groupId in die Dokument-ID!
 const getMealPlanDocId = (dateStr: string) => `${getGroupId()}_${dateStr}`;
 
 export const getMealPlans = async (): Promise<Record<string, { recipes: string[] }>> => {
@@ -291,8 +349,6 @@ export const getMealPlans = async (): Promise<Record<string, { recipes: string[]
 
   snap.docs.forEach(d => {
     const data = d.data();
-    // Wenn das Dokument schon den dateString gespeichert hat, nutzen wir den.
-    // Ansonsten extrahieren wir ihn aus der ID (z.B. "UID_2023-10-25" -> "2023-10-25")
     const dateKey = data.dateString || d.id.replace(`${getGroupId()}_`, '');
     plans[dateKey] = data as { recipes: string[] };
   });
@@ -303,8 +359,7 @@ export const getMealPlans = async (): Promise<Record<string, { recipes: string[]
 export const addRecipeToMealPlan = async (dateStr: string, recipeId: string, cookId: string): Promise<void> => {
   const docRef = doc(db, 'mealPlan', getMealPlanDocId(dateStr));
   const docSnap = await getDoc(docRef);
-
-  const entry = { recipeId, cookId }; // Wir speichern beides als Objekt
+  const entry = { recipeId, cookId };
 
   if (docSnap.exists()) {
     await updateDoc(docRef, { recipes: arrayUnion(entry) });
@@ -323,9 +378,8 @@ export const removeRecipeFromMealPlan = async (dateStr: string, recipeId: string
   await updateDoc(docRef, { recipes: arrayRemove(recipeId) });
 };
 
-
 // ==========================================
-// EINKAUFSLISTE (Shopping List)
+// 8. EINKAUFSLISTE (Shopping List)
 // ==========================================
 
 export const getShoppingList = async (): Promise<ShoppingListFirebase[]> => {
@@ -335,16 +389,15 @@ export const getShoppingList = async (): Promise<ShoppingListFirebase[]> => {
 };
 
 export const addShoppingListItem = async (data: ShoppingList): Promise<string> => {
-  const uid = auth.currentUser?.uid; // Hol die ID des aktuellen Nutzers
+  const uid = auth.currentUser?.uid;
   const docRef = await addDoc(collection(db, 'shoppingList'), {
     ...data,
     groupId: getGroupId(),
-    authorId: uid // NEU: Damit wir wissen, wer es hinzugefügt hat
+    authorId: uid
   });
   return docRef.id;
 };
 
-// --- UPDATE: Batch-Update ebenfalls mit authorId ---
 export const batchUpdateShoppingList = async (
   itemsToUpdate: { docId: string; amount: number }[],
   itemsToAdd: ShoppingList[]
@@ -359,7 +412,6 @@ export const batchUpdateShoppingList = async (
 
   itemsToAdd.forEach(item => {
     const newRef = doc(collection(db, 'shoppingList'));
-    // NEU: authorId beim Erstellen hinzufügen
     batch.set(newRef, { ...item, groupId: getGroupId(), authorId: uid });
   });
 
@@ -375,16 +427,9 @@ export const deleteShoppingListItem = async (id: string): Promise<void> => {
 };
 
 export const subscribeToShoppingList = (callback: (items: ShoppingListFirebase[]) => void): Unsubscribe => {
-  // NEU: Der Live-Listener hört nur noch auf die Einkaufsliste der eigenen WG!
   const q = query(collection(db, 'shoppingList'), where('groupId', '==', getGroupId()));
   return onSnapshot(q, (snapshot) => {
     const items = snapshot.docs.map(d => ({ id: d.id, ...(d.data() as ShoppingList) }));
-    callback(items);
+    callback(items as ShoppingListFirebase[]);
   });
-};
-
-export const updateUserWGPrefs = async (prefs: { shareMealPlan: boolean, shareShoppingList: boolean }) => {
-  const uid = auth.currentUser?.uid;
-  if (!uid) return;
-  await updateDoc(doc(db, 'users', uid), prefs);
 };

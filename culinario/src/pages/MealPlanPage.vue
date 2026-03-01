@@ -3,6 +3,9 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { date, useQuasar } from 'quasar';
 import { auth } from '../firebase/index';
+import { getDoc, doc } from 'firebase/firestore';
+import { db } from '../firebase/index';
+
 // 1. Zentrale Typen
 import type { RecipeFirebase, ShoppingList } from '../types/index';
 
@@ -38,10 +41,19 @@ const showPicker = ref(false);
 const activeDateString = ref('');
 const pickerSearch = ref('');
 
+const weekStart = ref(1);
+const hidePastDays = ref(false);
+
 // --- DATEN LADEN ---
 onMounted(async () => {
   try {
-    // 3. Sauber über den Service laden
+    const userSnap = await getDoc(doc(db, 'users', auth.currentUser!.uid));
+    if (userSnap.exists()) {
+      const data = userSnap.data();
+      weekStart.value = data.weekStart ?? 1;
+      hidePastDays.value = data.hidePastDays ?? false;
+    }
+
     allRecipes.value = await getRecipes();
     mealPlans.value = await getMealPlans();
     memberSettings.value = await getGroupMemberSettings();
@@ -54,15 +66,25 @@ onMounted(async () => {
 // --- WOCHEN-LOGIK ---
 const weekDays = computed(() => {
   const days = [];
-  const todayStart = date.startOfDate(currentAnchorDate.value, 'day');
+  const todayStart = date.startOfDate(new Date(), 'day');
+  const anchorStart = date.startOfDate(currentAnchorDate.value, 'day');
 
-  const dayOfWeek = date.getDayOfWeek(todayStart);
-  const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-  const start = date.subtractFromDate(todayStart, { days: daysSinceMonday });
+  const dayOfWeek = date.getDayOfWeek(anchorStart);
+  let daysToSubtract = 0;
+  if (weekStart.value === 1) { // Woche startet Montag
+    daysToSubtract = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  } else {
+    daysToSubtract = dayOfWeek;
+  }
+
+  const start = date.subtractFromDate(anchorStart, { days: daysToSubtract });
 
   for (let i = 0; i < 7; i++) {
     const d = date.addToDate(start, { days: i });
     const dStr = date.formatDate(d, 'YYYY-MM-DD');
+
+    if (hidePastDays.value && d < todayStart) continue;
+
     const rawEntries = mealPlans.value[dStr]?.recipes || [];
 
     days.push({
@@ -201,9 +223,7 @@ const addWeekToCart = async () => {
         if (!recipe.ingredients) return;
 
         recipe.ingredients.forEach(ing => {
-          // Typsicheres Auslesen der ID (Unterstützt alte und neue Daten)
-          const flexibleIng = ing as typeof ing & { ingredientId?: string };
-          const ingId = flexibleIng.ingredientID || flexibleIng.ingredientId;
+          const ingId = ing.ingredientID;
 
           if (!ingId) return;
 
@@ -269,87 +289,91 @@ const addWeekToCart = async () => {
 </script>
 
 <template>
-  <q-page class="bg-dark-page text-white q-pa-md q-pa-lg-xl">
+  <q-page class="bg-dynamic-page dynamic-text q-pa-md q-pa-lg-xl transition-ease">
     <div class="max-width-container">
 
       <div class="row items-center justify-between q-mb-xl wrap q-gutter-y-md header-responsive">
 
-        <h1 class="text-h4 text-weight-bold q-my-none text-white gt-sm">Wochenplan</h1>
-        <h1 class="text-h5 text-weight-bold q-my-none text-white lt-md">Wochenplan</h1>
+        <h1 class="text-h4 text-weight-bold q-my-none dynamic-text gt-sm">Wochenplan</h1>
+        <h1 class="text-h5 text-weight-bold q-my-none dynamic-text lt-md">Wochenplan</h1>
 
         <div class="row items-center q-gutter-sm controls-wrapper">
 
-          <q-btn unelevated class="bg-dark border-dark hover-primary" text-color="primary" icon="add_shopping_cart"
-            @click="addWeekToCart" :loading="isAddingToCart" style="height: 40px; padding: 0 12px;">
+          <q-btn unelevated class="dynamic-card dynamic-border hover-primary transition-ease" text-color="primary"
+            icon="add_shopping_cart" @click="addWeekToCart" :loading="isAddingToCart"
+            style="height: 40px; padding: 0 12px;">
             <span class="q-ml-sm text-weight-bold gt-xs">Einkaufen</span>
             <q-tooltip class="bg-primary text-white">Alle Zutaten dieser Woche zur Einkaufsliste hinzufügen</q-tooltip>
           </q-btn>
 
-          <div class="date-navigator row items-center bg-dark q-px-xs rounded-borders border-dark"
+          <div
+            class="date-navigator row items-center dynamic-card dynamic-border q-px-xs rounded-borders transition-ease"
             style="height: 40px;">
-            <q-btn flat round dense icon="chevron_left" color="white" @click="changeWeek(-1)" size="sm" />
-            <div class="text-subtitle2 text-weight-bold text-center q-mx-sm" style="min-width: 120px;">
+            <q-btn flat round dense icon="chevron_left" class="dynamic-text" @click="changeWeek(-1)" size="sm" />
+            <div class="text-subtitle2 text-weight-bold text-center q-mx-sm dynamic-text" style="min-width: 120px;">
               {{ weekRangeLabel }}
             </div>
-            <q-btn flat round dense icon="chevron_right" color="white" @click="changeWeek(1)" size="sm" />
+            <q-btn flat round dense icon="chevron_right" class="dynamic-text" @click="changeWeek(1)" size="sm" />
           </div>
 
-          <q-btn unelevated class="bg-dark border-dark text-weight-bold" text-color="white" label="Heute"
-            @click="goToToday" no-caps style="height: 40px; padding: 0 16px;" />
+          <q-btn unelevated class="dynamic-card dynamic-border text-weight-bold dynamic-text transition-ease"
+            label="Heute" @click="goToToday" no-caps style="height: 40px; padding: 0 16px;" />
 
         </div>
       </div>
 
       <div class="row q-col-gutter-lg">
         <div v-for="day in weekDays" :key="day.dateString" class="col-12 col-sm-6 col-md-4 col-lg-3">
-          <q-card class="day-card column full-height bg-dark text-white" :class="{ 'today-card': day.isToday }">
+
+          <q-card class="day-card dynamic-card column full-height transition-ease"
+            :class="{ 'today-card': day.isToday }">
 
             <q-card-section class="q-pa-md row justify-between items-center day-header">
               <div>
-                <div class="text-subtitle1 text-weight-bold" :class="day.isToday ? 'text-primary' : 'text-white'">
+                <div class="text-subtitle1 text-weight-bold" :class="day.isToday ? 'text-primary' : 'dynamic-text'">
                   {{ day.weekday }}
                 </div>
-                <div class="text-caption text-grey-5">{{ day.displayDate }}</div>
+                <div class="text-caption dynamic-text-muted">{{ day.displayDate }}</div>
               </div>
               <q-btn flat round dense icon="add" color="primary" class="hover-primary-bg"
                 @click="openRecipePicker(day.dateString)" />
             </q-card-section>
 
-            <q-separator dark inset class="separator-color" />
+            <q-separator :dark="$q.dark.isActive" inset class="opacity-20" />
 
             <q-card-section class="q-pa-md col relative-position column q-gutter-y-sm">
 
               <div v-if="day.plannedRecipes.length === 0"
-                class="empty-plan-box flex flex-center text-center text-grey-6 cursor-pointer q-pa-lg"
+                class="empty-plan-box flex flex-center text-center dynamic-text-muted cursor-pointer q-pa-lg transition-ease"
                 @click="openRecipePicker(day.dateString)">
                 <div>
-                  <q-icon name="add_circle_outline" size="md" class="q-mb-sm text-primary" />
+                  <q-icon name="add_circle_outline" size="md" class="q-mb-sm text-primary opacity-60" />
                   <div class="text-caption">Rezept planen</div>
                 </div>
               </div>
 
               <transition-group name="list" tag="div" class="q-gutter-y-sm">
                 <div v-for="recipe in day.plannedRecipes" :key="recipe.id"
-                  class="recipe-item row no-wrap items-center rounded-borders cursor-pointer"
+                  class="recipe-item bg-dynamic-page dynamic-border row no-wrap items-center rounded-borders cursor-pointer transition-ease"
                   @click="goToRecipe(recipe.id)">
 
                   <q-img :src="recipe.image || 'placeholder.jpg'" class="recipe-image rounded-borders">
                     <template v-slot:error>
-                      <div class="absolute-full flex flex-center bg-grey-9">
-                        <q-icon name="restaurant" color="grey-6" />
+                      <div class="absolute-full flex flex-center bg-dynamic-soft">
+                        <q-icon name="restaurant" class="dynamic-text-muted" />
                       </div>
                     </template>
                   </q-img>
 
                   <div class="col q-px-md overflow-hidden">
-                    <div class="text-body2 text-weight-bold ellipsis-2-lines">{{ recipe.name }}</div>
+                    <div class="text-body2 text-weight-bold ellipsis-2-lines dynamic-text">{{ recipe.name }}</div>
                     <div class="text-caption text-primary row items-center" v-if="recipe.cookId">
                       <q-icon name="person" size="xs" class="q-mr-xs" />
                       {{ getCookName(recipe.cookId) }}
                     </div>
                   </div>
 
-                  <q-btn flat dense round icon="close" size="sm" color="grey-5" class="q-mr-sm hover-negative"
+                  <q-btn flat dense round icon="close" size="sm" class="q-mr-sm dynamic-text-muted hover-negative"
                     @click.stop="removeRecipeFromDay(day.dateString, recipe.id!)" />
                 </div>
               </transition-group>
@@ -359,41 +383,42 @@ const addWeekToCart = async () => {
         </div>
       </div>
 
-      <q-dialog v-model="showPicker" position="standard">
-        <q-card class="bg-dark text-white dialog-card column border-dark">
+      <q-dialog v-model="showPicker" position="standard" backdrop-filter="blur(5px)">
+        <q-card class="dynamic-card dynamic-text dialog-card column rounded-xl overflow-hidden">
 
-          <q-card-section class="row items-center q-pb-none">
+          <q-card-section class="row items-center q-pb-none bg-dynamic-soft">
             <div class="text-h6 text-primary text-weight-bold">Was gibt es zu essen?</div>
             <q-space />
-            <q-btn icon="close" flat round dense v-close-popup color="grey-5" />
+            <q-btn icon="close" flat round dense v-close-popup class="dynamic-text-muted" />
           </q-card-section>
 
-          <q-card-section class="q-pt-md">
-            <div class="text-caption text-grey-5 q-mb-xs">Wer kocht?</div>
+          <q-card-section class="q-pt-md bg-dynamic-soft dynamic-border-bottom">
+            <div class="text-caption dynamic-text-muted q-mb-xs">Wer kocht?</div>
             <q-select v-model="selectedCookId" :options="groupMembers" option-value="id" option-label="name" emit-value
-              map-options filled dark dense class="custom-dark-input q-mb-md" />
+              map-options filled :dark="$q.dark.isActive" color="primary" dense class="custom-dynamic-input q-mb-md" />
 
-            <q-input v-model="pickerSearch" dense filled dark placeholder="Rezept suchen..." autofocus
-              class="custom-dark-input">
-              <template v-slot:append><q-icon name="search" color="grey-5" /></template>
+            <q-input v-model="pickerSearch" dense filled :dark="$q.dark.isActive" color="primary"
+              placeholder="Rezept suchen..." autofocus class="custom-dynamic-input">
+              <template v-slot:append><q-icon name="search" class="dynamic-text-muted" /></template>
             </q-input>
           </q-card-section>
 
-          <q-card-section class="scroll col q-pt-none">
+          <q-card-section class="scroll col q-pt-none q-mt-sm">
             <q-list class="q-gutter-y-xs">
               <q-item v-for="r in filteredRecipesForPicker" :key="r.id" clickable v-ripple @click="addRecipeToPlan(r)"
-                class="recipe-picker-item rounded-borders q-pa-sm">
+                class="recipe-picker-item rounded-borders q-pa-sm list-item-hover">
 
                 <q-item-section avatar>
-                  <q-avatar rounded size="48px">
+                  <q-avatar rounded size="48px" class="shadow-1">
                     <img :src="r.image" v-if="r.image" style="object-fit: cover;">
-                    <q-icon name="restaurant" v-else color="grey" class="bg-grey-9 full-width full-height" />
+                    <q-icon name="restaurant" v-else
+                      class="bg-dynamic-soft dynamic-text-muted full-width full-height" />
                   </q-avatar>
                 </q-item-section>
 
                 <q-item-section>
-                  <q-item-label class="text-weight-bold text-white">{{ r.name }}</q-item-label>
-                  <q-item-label caption class="text-grey-5" v-if="r.category">{{ r.category }}</q-item-label>
+                  <q-item-label class="text-weight-bold dynamic-text">{{ r.name }}</q-item-label>
+                  <q-item-label caption class="dynamic-text-muted" v-if="r.category">{{ r.category }}</q-item-label>
                 </q-item-section>
 
                 <q-item-section side>
@@ -401,7 +426,7 @@ const addWeekToCart = async () => {
                 </q-item-section>
               </q-item>
 
-              <div v-if="filteredRecipesForPicker.length === 0" class="text-center q-pa-xl text-grey-6">
+              <div v-if="filteredRecipesForPicker.length === 0" class="text-center q-pa-xl dynamic-text-muted">
                 <q-icon name="search_off" size="xl" class="q-mb-sm" />
                 <div>Kein Rezept gefunden.</div>
               </div>
@@ -416,24 +441,14 @@ const addWeekToCart = async () => {
 
 <style scoped>
 /* --- GLOBALES DESIGN --- */
-.bg-dark-page {
-  background-color: #161616;
-  min-height: 100vh;
-}
-
 .max-width-container {
   max-width: 1400px;
-  /* Zentriert auf PC, wie bei HomePage */
   margin: 0 auto;
   width: 100%;
 }
 
-.border-dark {
-  border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.separator-color {
-  background-color: rgba(255, 255, 255, 0.05);
+.transition-ease {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 /* --- HEADER --- */
@@ -446,16 +461,18 @@ const addWeekToCart = async () => {
 
 /* --- DAY CARDS --- */
 .day-card {
-  border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 16px;
-  background-color: #222222 !important;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 @media (hover: hover) {
   .day-card:hover {
     transform: translateY(-4px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  }
+
+  :global(.body--dark) .day-card:hover {
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   }
 }
 
@@ -463,35 +480,48 @@ const addWeekToCart = async () => {
   min-height: 72px;
 }
 
+/* Heute-Karte leuchtet in der Primary Color */
 .today-card {
-  border: 2px solid #66a182 !important;
-  /* Striktes Primary Grün */
-  box-shadow: 0 0 15px rgba(102, 161, 130, 0.15);
+  border: 2px solid var(--q-primary) !important;
+  box-shadow: 0 0 15px color-mix(in srgb, var(--q-primary), transparent 85%);
 }
 
 /* Empty State / Add Box */
 .empty-plan-box {
-  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border: 1px dashed;
   border-radius: 12px;
   height: 100px;
-  transition: all 0.2s ease;
+}
+
+:global(.body--dark) .empty-plan-box {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+:global(.body--light) .empty-plan-box {
+  border-color: rgba(0, 0, 0, 0.15);
 }
 
 .empty-plan-box:hover {
-  border-color: #66a182;
-  background-color: rgba(102, 161, 130, 0.05);
+  border-color: var(--q-primary);
+  background-color: color-mix(in srgb, var(--q-primary), transparent 95%);
+}
+
+.opacity-60 {
+  opacity: 0.6;
+}
+
+.opacity-20 {
+  opacity: 0.2;
 }
 
 /* Recipe Items in Day Card */
 .recipe-item {
-  background-color: #161616;
-  border: 1px solid rgba(255, 255, 255, 0.05);
   padding: 6px;
-  transition: background-color 0.2s ease;
 }
 
 .recipe-item:hover {
-  background-color: #2a2a2a;
+  background-color: color-mix(in srgb, var(--q-primary), transparent 96%);
+  border-color: color-mix(in srgb, var(--q-primary), transparent 80%);
 }
 
 .recipe-image {
@@ -502,24 +532,23 @@ const addWeekToCart = async () => {
 
 /* --- UTILITIES & HOVERS --- */
 .hover-primary:hover {
-  color: #66a182 !important;
-  border-color: #66a182 !important;
+  color: var(--q-primary) !important;
+  border-color: var(--q-primary) !important;
 }
 
 .hover-primary-bg:hover {
-  background-color: rgba(102, 161, 130, 0.15);
+  background-color: color-mix(in srgb, var(--q-primary), transparent 85%);
 }
 
 .hover-negative:hover {
-  color: #f7204c !important;
-  background-color: rgba(247, 32, 76, 0.1);
+  color: var(--q-negative) !important;
+  background-color: color-mix(in srgb, var(--q-negative), transparent 90%);
 }
 
 /* --- DIALOG & PICKER --- */
 .dialog-card {
   width: 500px;
   max-width: 95vw;
-  border-radius: 16px;
   max-height: 80vh;
 }
 
@@ -528,25 +557,36 @@ const addWeekToCart = async () => {
   transition: all 0.2s ease;
 }
 
-.recipe-picker-item:hover {
-  background-color: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.1);
+:global(.body--dark) .list-item-hover:hover {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+:global(.body--light) .list-item-hover:hover {
+  background-color: rgba(0, 0, 0, 0.03);
 }
 
 /* Custom Input inside Dialog */
-:deep(.custom-dark-input .q-field__control) {
-  background-color: #161616 !important;
-  border-radius: 8px;
+:deep(.custom-dynamic-input .q-field__control) {
+  border-radius: 10px;
+  padding: 0 16px;
 }
 
-:deep(.custom-dark-input .q-field__control:before) {
+:global(.body--dark) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+:global(.body--light) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+:deep(.custom-dynamic-input .q-field__control:before) {
   border-bottom: none !important;
 }
 
 /* Animations */
 .list-enter-active,
 .list-leave-active {
-  transition: all 0.3s ease;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .list-enter-from,

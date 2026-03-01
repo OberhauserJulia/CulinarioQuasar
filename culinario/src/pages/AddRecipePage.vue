@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { useQuasar } from 'quasar';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { VueDraggableNext } from 'vue-draggable-next';
+import { auth } from '../firebase/index';
 
 // 1. Zentrale Typen importieren
 import type { Recipe, RecipeFirebase, IngredientItem, IngredientFirebase } from '../types/index';
@@ -366,8 +367,8 @@ const processAllIngredients = async () => {
               originalText: { type: SchemaType.STRING },
               amount: { type: SchemaType.NUMBER },
               unit: { type: SchemaType.STRING },
-              singularName: { type: SchemaType.STRING },
-              pluralName: { type: SchemaType.STRING },
+              singularName: { type: SchemaType.STRING }, // Wichtig für DB-Key
+              pluralName: { type: SchemaType.STRING },   // Wichtig für Anzeige > 1
               displayName: { type: SchemaType.STRING },
               note: { type: SchemaType.STRING }
             },
@@ -378,7 +379,9 @@ const processAllIngredients = async () => {
     });
 
     const textsToAnalyze = itemsToProcess.map(item => item.text.trim());
-    const prompt = `Analysiere diese Zutatenliste. Ordne jede Zutat exakt ihrem Ursprungstext ("originalText") zu:\n${JSON.stringify(textsToAnalyze)}`;
+    const prompt = `Analysiere diese Zutatenliste für eine Rezept-App.
+    Extrahiere für jede Zutat den Singular (singularName) und den Plural (pluralName) auf Deutsch.
+    Ordne jede Zutat exakt ihrem Ursprungstext ("originalText") zu:\n${JSON.stringify(textsToAnalyze)}`;
 
     const result = await model.generateContent(prompt);
     const aiDataArray = JSON.parse(result.response.text()) as AIParsedIngredient[];
@@ -388,6 +391,7 @@ const processAllIngredients = async () => {
       if (!targetItem) continue;
 
       const capSingular = capitalize(aiData.singularName);
+      // 1. Suche erst in der DB, ob es die Zutat (oder ihren Plural) schon gibt
       const existingIng = await getIngredientByName(capSingular);
 
       let finalIngredientID = '';
@@ -396,33 +400,36 @@ const processAllIngredients = async () => {
       if (existingIng) {
         finalIngredientID = existingIng.id;
         finalImage = existingIng.image || '';
+        // Falls der Plural in der DB noch fehlt, tragen wir ihn jetzt nach
         if (!existingIng.plural && aiData.pluralName) {
           await updateIngredient(existingIng.id, { plural: capitalize(aiData.pluralName) });
         }
       } else {
+        // 2. NEU ANLEGEN: Mit Metadaten für die Wartung
         finalIngredientID = await addIngredient({
-          name: aiData.singularName,
+          name: capSingular,
           plural: capitalize(aiData.pluralName),
-          categoryId: '',
-          image: ''
+          categoryId: 'unknown', // Standard-Kategorie
+          image: '',
+          isVerified: false,     // Kennzeichnung als "Nutzer-Zutat"
+          createdBy: auth.currentUser?.uid || 'system'
         });
       }
 
-      const rawNameToShow = aiData.displayName || aiData.singularName;
-      const nameToShow = capitalize(rawNameToShow);
+      // UI-Aufbereitung
+      const isPlural = aiData.amount > 1;
+      const nameToShow = isPlural ? capitalize(aiData.pluralName) : capitalize(aiData.singularName);
       const noteText = aiData.note || '';
 
-      const processed: LocalIngredient = {
+      targetItem.processedData = {
         ingredientID: finalIngredientID,
         amount: aiData.amount > 0 ? aiData.amount : null,
         unit: aiData.unit || '',
-        symbol: aiData.unit || '', // Für den Mixer
         name: nameToShow,
+        image: finalImage,
+        note: noteText
       };
-      if (finalImage) processed.image = finalImage;
-      if (noteText) processed.note = noteText;
 
-      targetItem.processedData = processed;
       const amtStr = aiData.amount > 0 ? `${aiData.amount} ` : '';
       const unitStr = aiData.unit ? `${aiData.unit} ` : '';
       const noteSuffix = noteText ? ` (${noteText})` : '';
@@ -430,25 +437,17 @@ const processAllIngredients = async () => {
     }
 
     knownIngredients.value = await getIngredients();
-
-    // ZUSAMMENFASSEN direkt nach der KI
     uiIngredients.value = consolidateIngredients(uiIngredients.value, 'de');
     uiIngredients.value.push({ text: '', isProcessing: false, processedData: null });
 
-    $q.notify({ type: 'positive', message: 'Neue Zutaten erfolgreich gelernt & zusammengefasst!', icon: 'auto_awesome' });
-
   } catch (error: unknown) {
-    if (error instanceof Error && error.message.includes('429')) {
-      $q.notify({ type: 'warning', message: 'KI-Limit erreicht. Bitte warte ca. 1 Minute.', icon: 'timer' });
-    } else {
-      $q.notify({ type: 'negative', message: 'Fehler beim Verarbeiten der Zutaten.' });
-    }
+    console.error(error);
+    $q.notify({ type: 'negative', message: 'Fehler bei der Zutaten-Analyse.' });
   } finally {
     isProcessingAll.value = false;
     itemsToProcess.forEach(item => item.isProcessing = false);
   }
 };
-
 
 // --- IMPORT LOGIK ---
 interface JsonLdRecipe {
@@ -1019,6 +1018,10 @@ onMounted(async () => {
   knownIngredients.value = await getIngredients();
 
   if (editId.value) {
+
+    const savedDefault = localStorage.getItem('defaultPortions') || '2';
+    uiRecipeAmount.value = `${savedDefault} Portionen`;
+
     try {
       const data = await getRecipeById(editId.value);
       if (data) {
@@ -1119,26 +1122,26 @@ const resolveIngredientDetailsForSteps = async () => {
 </script>
 
 <template>
-  <q-page class="bg-dark-page text-white q-pa-md q-pa-lg-xl">
+  <q-page class="bg-dynamic-page dynamic-text q-pa-md q-pa-lg-xl transition-ease">
     <div class="max-width-container">
 
       <q-form @submit.prevent="submitRecipe">
 
-        <div class="row items-center justify-between q-mb-xl sticky-action-bar z-top">
-          <h1 class="text-h4 text-weight-bold q-my-none gt-xs">
+        <div class="row items-center justify-between q-mb-xl sticky-action-bar z-top transition-ease">
+          <h1 class="text-h4 text-weight-bold q-my-none dynamic-text gt-xs">
             {{ editId ? 'Rezept bearbeiten' : 'Neues Rezept' }}
           </h1>
-          <h1 class="text-h5 text-weight-bold q-my-none lt-sm">
+          <h1 class="text-h5 text-weight-bold q-my-none dynamic-text lt-sm">
             {{ editId ? 'Bearbeiten' : 'Neues Rezept' }}
           </h1>
 
           <div class="row items-center q-gutter-sm">
             <q-btn outline color="primary" icon="cloud_download" label="Import" @click="showImportDialog = true"
-              v-if="!editId" no-caps class="gt-xs" />
+              v-if="!editId" no-caps class="gt-xs bg-dynamic-page" />
             <q-btn outline color="primary" icon="cloud_download" @click="showImportDialog = true" v-if="!editId" no-caps
-              class="lt-sm q-px-sm" />
+              class="lt-sm q-px-sm bg-dynamic-page" />
 
-            <q-btn flat color="white" label="Abbrechen" @click="goBack" no-caps class="gt-xs" />
+            <q-btn flat class="dynamic-text-muted" label="Abbrechen" @click="goBack" no-caps />
             <q-btn color="primary" icon="save" label="Speichern" type="submit" :loading="isSaving" padding="8px 24px"
               no-caps class="text-weight-bold shadow-4" style="border-radius: 8px;" />
           </div>
@@ -1152,7 +1155,8 @@ const resolveIngredientDetailsForSteps = async () => {
                 <q-file ref="fileInputRef" v-model="imageFileToUpload" style="display: none" accept="image/*"
                   @update:model-value="onFileSelected" />
 
-                <div class="image-upload-box flex flex-center cursor-pointer q-pa-sm" @click="triggerFileInput">
+                <div class="image-upload-box flex flex-center cursor-pointer q-pa-sm transition-ease"
+                  @click="triggerFileInput">
                   <template v-if="!localImagePreview && !recipeData.image">
                     <div class="text-center text-primary">
                       <q-icon name="add_photo_alternate" size="2.5rem" class="q-mb-sm" />
@@ -1167,23 +1171,24 @@ const resolveIngredientDetailsForSteps = async () => {
                   class="absolute-top-right q-ma-sm shadow-3" style="z-index: 10;" @click.stop="removeImage" />
               </div>
 
-              <q-input v-model="recipeData.image" placeholder="Oder Bild-URL einfügen (z.B. https://...)" filled dark
-                dense class="custom-dark-input q-mb-lg" @update:model-value="onImageUrlInput">
+              <q-input v-model="recipeData.image" placeholder="Oder Bild-URL einfügen (z.B. https://...)" filled
+                :dark="$q.dark.isActive" dense class="custom-dynamic-input q-mb-lg" color="primary"
+                @update:model-value="onImageUrlInput">
                 <template v-slot:prepend>
-                  <q-icon name="link" size="xs" color="grey-6" />
+                  <q-icon name="link" size="xs" class="dynamic-text-muted" />
                 </template>
               </q-input>
 
               <div class="q-mb-md">
                 <div class="text-primary text-weight-bold text-subtitle-responsive q-mb-sm">Rezeptname</div>
-                <q-input v-model="recipeData.name" placeholder="Name eingeben" filled dark class="custom-dark-input"
-                  hide-bottom-space clearable />
+                <q-input v-model="recipeData.name" placeholder="Name eingeben" filled :dark="$q.dark.isActive"
+                  class="custom-dynamic-input" color="primary" hide-bottom-space clearable />
               </div>
 
               <div class="q-mb-md">
                 <div class="text-primary text-weight-bold text-subtitle-responsive q-mb-sm">Privatsphäre</div>
                 <q-btn-toggle v-model="recipeData.visibility" spread no-caps rounded unelevated toggle-color="primary"
-                  color="dark" text-color="grey-5" :options="[
+                  class="dynamic-border bg-dynamic-soft dynamic-text-muted text-weight-medium" :options="[
                     { label: 'Für WG sichtbar', value: 'public', icon: 'groups' },
                     { label: 'Nur für mich', value: 'private', icon: 'lock' }
                   ]" />
@@ -1194,20 +1199,21 @@ const resolveIngredientDetailsForSteps = async () => {
                 <div class="q-gutter-y-sm">
 
                   <div class="row no-wrap items-center q-gutter-x-sm">
-                    <q-select v-model="recipeData.category" :options="categories" label="Rezeptkategorie" filled dark
-                      emit-value map-options clearable behavior="menu" class="custom-dark-input col"
-                      hide-bottom-space />
-                    <q-btn flat round icon="add" color="primary" class="bg-dark-soft" @click="promptNewCategory">
+                    <q-select v-model="recipeData.category" :options="categories" label="Rezeptkategorie" filled
+                      :dark="$q.dark.isActive" color="primary" emit-value map-options clearable behavior="menu"
+                      class="custom-dynamic-input col category-select" hide-bottom-space
+                      popup-content-class="dynamic-card dynamic-text" />
+                    <q-btn flat round icon="add" color="primary" class="bg-dynamic-soft" @click="promptNewCategory">
                       <q-tooltip class="bg-primary">Neue Kategorie erstellen</q-tooltip>
                     </q-btn>
                   </div>
 
-                  <q-input v-model="uiRecipeAmount" label="Rezeptmenge" filled dark class="custom-dark-input"
-                    hide-bottom-space clearable />
-                  <q-input v-model="recipeData.ovensettings" label="Ofeneinstellung" filled dark
-                    class="custom-dark-input" hide-bottom-space clearable />
-                  <q-input v-model="recipeData.source" label="Quelle" filled dark class="custom-dark-input"
-                    hide-bottom-space clearable />
+                  <q-input v-model="uiRecipeAmount" label="Rezeptmenge" filled :dark="$q.dark.isActive" color="primary"
+                    class="custom-dynamic-input" hide-bottom-space clearable />
+                  <q-input v-model="recipeData.ovensettings" label="Ofeneinstellung" filled :dark="$q.dark.isActive"
+                    color="primary" class="custom-dynamic-input" hide-bottom-space clearable />
+                  <q-input v-model="recipeData.source" label="Quelle" filled :dark="$q.dark.isActive" color="primary"
+                    class="custom-dynamic-input" hide-bottom-space clearable />
                 </div>
               </div>
             </div>
@@ -1221,11 +1227,12 @@ const resolveIngredientDetailsForSteps = async () => {
               <VueDraggableNext v-model="uiIngredients" handle=".drag-handle" animation="200"
                 ghost-class="drop-ghost-line">
                 <div v-for="(ing, index) in uiIngredients" :key="index" class="row items-center no-wrap q-mb-sm">
-                  <q-icon v-if="ing.processedData" name="drag_indicator" color="grey-6" size="sm"
-                    class="q-mr-sm cursor-pointer drag-handle hover-primary" />
+                  <q-icon v-if="ing.processedData" name="drag_indicator" size="sm"
+                    class="q-mr-sm cursor-pointer drag-handle dynamic-text-muted hover-primary" />
 
-                  <q-input v-model="ing.text" label="Menge und Zutat" filled dark class="custom-dark-input full-width"
-                    @update:model-value="handleIngredientEdit(index)" @blur="tryParseLocally(index)" hide-bottom-space>
+                  <q-input v-model="ing.text" label="Menge und Zutat" filled :dark="$q.dark.isActive" color="primary"
+                    class="custom-dynamic-input full-width" @update:model-value="handleIngredientEdit(index)"
+                    @blur="tryParseLocally(index)" hide-bottom-space>
                     <template v-slot:prepend v-if="ing.processedData?.image">
                       <q-avatar size="24px" rounded><img :src="ing.processedData.image"></q-avatar>
                     </template>
@@ -1244,56 +1251,62 @@ const resolveIngredientDetailsForSteps = async () => {
 
             <div class="text-primary text-weight-bold text-subtitle-responsive q-mb-md">Zubereitungsschritte</div>
             <div v-for="(step, index) in preparationSteps" :key="index" class="q-mb-lg">
-              <q-chip square color="primary" text-color="white" class="text-weight-bold q-mb-sm step-chip"
+              <q-chip square color="primary" text-color="white" class="text-weight-bold q-mb-sm step-chip shadow-1"
                 style="border-radius: 6px;">
                 {{ index + 1 }}. Schritt
               </q-chip>
-              <div class="step-container shadow-2">
-                <q-input v-model="step.description" type="textarea" placeholder="Beschreibung..." filled dark autogrow
-                  class="custom-dark-input step-textarea" hide-bottom-space />
 
-                <div class="step-action-bar q-pa-sm">
+              <div class="step-container dynamic-card dynamic-border shadow-1 rounded-borders">
+                <q-input v-model="step.description" type="textarea" placeholder="Beschreibung..." filled
+                  :dark="$q.dark.isActive" color="primary" autogrow class="custom-dynamic-input step-textarea"
+                  hide-bottom-space />
+
+                <div class="step-action-bar q-pa-sm dynamic-border-top bg-dynamic-soft">
                   <div class="row items-center q-gutter-sm">
                     <q-chip v-for="(stepIng, ingIndex) in step.ingredients" :key="ingIndex" removable
                       @remove="removeIngredientFromStep(index, ingIndex)" color="primary" text-color="white"
-                      class="custom-chip">
+                      class="custom-chip text-weight-medium">
                       <q-avatar v-if="stepIng.image"><img :src="stepIng.image"></q-avatar>
                       <q-avatar v-else icon="restaurant" />
 
                       <span class="text-weight-bold q-mr-xs">{{ stepIng.amount }}{{ stepIng.unit }}</span>
                       <span>{{ stepIng.name }}</span>
 
-                      <span v-if="stepIng.note" class="q-ml-xs text-grey-4" style="font-size: 0.85em;">
+                      <span v-if="stepIng.note" class="q-ml-xs text-grey-3" style="font-size: 0.85em;">
                         ({{ stepIng.note }})
                       </span>
                     </q-chip>
 
                     <q-btn flat rounded no-caps :icon="step._showIngredientsUI ? 'close' : 'add'"
                       :label="(!step._showIngredientsUI && step.ingredients.length === 0) ? 'Zutat hinzufügen' : ''"
-                      @click="step._showIngredientsUI = !step._showIngredientsUI" color="white" />
+                      @click="step._showIngredientsUI = !step._showIngredientsUI" class="dynamic-text-muted" />
                   </div>
 
                   <q-slide-transition>
-                    <div v-if="step._showIngredientsUI" class="q-mt-sm q-pa-sm bg-dark-soft rounded-borders">
+                    <div v-if="step._showIngredientsUI"
+                      class="q-mt-sm q-pa-sm dynamic-card dynamic-border rounded-borders">
                       <div class="row q-col-gutter-sm items-stretch">
                         <div class="col-12 col-sm-6">
                           <q-select v-model="step._tempIngredient" :options="availableIngredientsForDropdown"
-                            option-label="name" label="Zutat" filled dark dense class="custom-dark-input"
+                            option-label="name" label="Zutat" filled :dark="$q.dark.isActive" color="primary" dense
+                            class="custom-dynamic-input popup-content-class"
+                            popup-content-class="dynamic-card dynamic-text"
                             @update:model-value="(val) => step._tempAmount = val ? val.availableAmount : null">
 
                             <template v-slot:option="scope">
-                              <q-item v-bind="scope.itemProps">
+                              <q-item v-bind="scope.itemProps" class="dynamic-text">
                                 <q-item-section avatar v-if="scope.opt.image">
                                   <q-avatar size="sm" rounded><img :src="scope.opt.image"></q-avatar>
                                 </q-item-section>
                                 <q-item-section>
                                   <q-item-label>
                                     {{ scope.opt.name }}
-                                    <span v-if="scope.opt.note" class="text-grey-5 q-ml-xs" style="font-size: 0.85em;">
+                                    <span v-if="scope.opt.note" class="dynamic-text-muted q-ml-xs"
+                                      style="font-size: 0.85em;">
                                       ({{ scope.opt.note }})
                                     </span>
                                   </q-item-label>
-                                  <q-item-label caption class="text-grey-6">
+                                  <q-item-label caption class="dynamic-text-muted">
                                     Verfügbar: {{ scope.opt.availableAmount }} {{ scope.opt.unit }}
                                   </q-item-label>
                                 </q-item-section>
@@ -1301,9 +1314,10 @@ const resolveIngredientDetailsForSteps = async () => {
                             </template>
 
                             <template v-slot:selected-item="scope">
-                              <div v-if="scope.opt" class="ellipsis">
+                              <div v-if="scope.opt" class="ellipsis dynamic-text">
                                 {{ scope.opt.name }}
-                                <span v-if="scope.opt.note" class="text-grey-5 q-ml-xs" style="font-size: 0.85em;">
+                                <span v-if="scope.opt.note" class="dynamic-text-muted q-ml-xs"
+                                  style="font-size: 0.85em;">
                                   ({{ scope.opt.note }})
                                 </span>
                               </div>
@@ -1313,15 +1327,16 @@ const resolveIngredientDetailsForSteps = async () => {
                         </div>
 
                         <div class="col-8 col-sm-4">
-                          <q-input v-model.number="step._tempAmount" type="number" label="Menge" filled dark dense
-                            class="custom-dark-input" :suffix="step._tempIngredient?.unit"
+                          <q-input v-model.number="step._tempAmount" type="number" label="Menge" filled
+                            :dark="$q.dark.isActive" color="primary" dense class="custom-dynamic-input"
+                            :suffix="step._tempIngredient?.unit"
                             :error="!!step._tempIngredient && (step._tempAmount ?? 0) > step._tempIngredient.availableAmount"
                             :error-message="step._tempIngredient ? `Maximal ${step._tempIngredient.availableAmount} ${step._tempIngredient.unit} verfügbar` : ''" />
                         </div>
 
                         <div class="col-4 col-sm-2">
-                          <q-btn color="primary" icon="check" class="full-height full-width" style="border-radius: 8px;"
-                            @click="addIngredientToStep(index)"
+                          <q-btn color="primary" icon="check" class="full-height full-width shadow-2"
+                            style="border-radius: 8px;" @click="addIngredientToStep(index)"
                             :disable="!step._tempIngredient || !step._tempAmount || step._tempAmount <= 0 || step._tempAmount > step._tempIngredient.availableAmount" />
                         </div>
                       </div>
@@ -1333,8 +1348,8 @@ const resolveIngredientDetailsForSteps = async () => {
 
             <div class="row justify-end q-mt-xl lt-md">
               <q-btn color="primary" icon="save" label="Rezept speichern" type="submit" :loading="isSaving"
-                class="full-width text-weight-bold" padding="12px" style="border-radius: 12px; font-size: 16px;"
-                no-caps />
+                class="full-width text-weight-bold shadow-4" padding="12px"
+                style="border-radius: 12px; font-size: 16px;" no-caps />
             </div>
 
           </div>
@@ -1342,74 +1357,90 @@ const resolveIngredientDetailsForSteps = async () => {
       </q-form>
     </div>
 
-    <q-dialog v-model="showImportDialog" persistent>
-      <q-card class="bg-dark text-white" style="width: 500px; max-width: 95vw;">
+    <q-dialog v-model="showImportDialog" persistent backdrop-filter="blur(5px)">
+      <q-card class="dynamic-card dynamic-text rounded-xl" style="width: 500px; max-width: 95vw;">
         <q-card-section class="row items-center">
-          <div class="text-h6 text-primary">Rezept importieren</div><q-space /><q-btn icon="close" flat round
-            v-close-popup />
+          <div class="text-h6 text-primary text-weight-bold">Rezept importieren</div>
+          <q-space />
+          <q-btn icon="close" flat round v-close-popup class="dynamic-text-muted" />
         </q-card-section>
-        <q-tabs v-model="importTab" class="text-primary" align="justify"><q-tab name="url" label="URL" /><q-tab
-            name="text" label="Text" /></q-tabs>
+
+        <q-tabs v-model="importTab" class="text-primary" active-color="primary" indicator-color="primary"
+          align="justify">
+          <q-tab name="url" label="URL" no-caps />
+          <q-tab name="text" label="Text" no-caps />
+        </q-tabs>
+
         <q-card-section class="q-pa-md">
-          <div class="row items-center q-mb-md bg-dark-soft q-pa-sm rounded-borders">
+          <div class="row items-center q-mb-md bg-dynamic-soft q-pa-sm rounded-borders dynamic-border">
             <q-icon name="translate" color="primary" size="sm" class="q-mr-sm" />
-            <q-item-label class="text-weight-bold flex-grow">Englische Rezepte übersetzen & umrechnen</q-item-label>
+            <q-item-label class="text-weight-bold flex-grow dynamic-text">Englische Rezepte übersetzen &
+              umrechnen</q-item-label>
             <q-toggle v-model="autoTranslate" color="primary" />
           </div>
 
-          <q-input v-if="importTab === 'url'" v-model="importUrl" label="URL" filled dark class="q-mb-md" />
-          <q-input v-else v-model="importText" type="textarea" label="Text" filled dark autogrow class="q-mb-md" />
+          <q-input v-if="importTab === 'url'" v-model="importUrl" label="URL einfügen" filled :dark="$q.dark.isActive"
+            color="primary" class="q-mb-md custom-dynamic-input" />
+          <q-input v-else v-model="importText" type="textarea" label="Rezept-Text" filled :dark="$q.dark.isActive"
+            color="primary" autogrow class="q-mb-md custom-dynamic-input" />
         </q-card-section>
-        <q-card-actions align="right" class="q-pa-md"><q-btn flat label="Abbrechen" v-close-popup /><q-btn
-            label="Importieren" color="primary" @click="processImport" :loading="isImporting" /></q-card-actions>
+
+        <q-card-actions align="right" class="q-pa-md bg-dynamic-soft dynamic-border-top">
+          <q-btn flat label="Abbrechen" v-close-popup class="dynamic-text-muted" no-caps />
+          <q-btn label="Importieren" color="primary" @click="processImport" :loading="isImporting" no-caps
+            class="text-weight-bold rounded-borders q-px-md" unelevated />
+        </q-card-actions>
       </q-card>
     </q-dialog>
+
   </q-page>
 </template>
 
 <style scoped>
-.bg-dark-page {
-  background-color: #161616;
-  min-height: 100vh;
-}
-
+/* --- LAYOUT UTILITIES --- */
 .max-width-container {
   max-width: 1200px;
-  /* Leicht erhöht für besseres Desktop-Feeling */
   margin: 0 auto;
 }
 
-/* --- NEU: STICKY BEREICHE FÜR DESKTOP --- */
+.transition-ease {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* --- STICKY BEREICHE FÜR DESKTOP --- */
 .sticky-action-bar {
   position: sticky;
   top: 0;
-  background-color: rgba(22, 22, 22, 0.95);
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(12px);
   padding: 16px 0;
   margin-top: -16px;
-  /* Gleicht das Seiten-Padding aus */
+}
+
+:global(.body--dark) .sticky-action-bar {
+  background-color: rgba(18, 18, 18, 0.85);
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+:global(.body--light) .sticky-action-bar {
+  background-color: rgba(244, 246, 248, 0.85);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 @media (min-width: 1024px) {
   .sticky-left-column {
     position: sticky;
     top: 100px;
-    /* Hängt unterhalb der Action-Bar */
     max-height: calc(100vh - 120px);
     overflow-y: auto;
-    /* Falls man auf sehr kleinen Laptops ist */
     padding-right: 12px;
-    /* Platz für den Scrollbar */
   }
 
-  /* Scrollbar für die linke Spalte unsichtbar machen (Clean Look) */
   .sticky-left-column::-webkit-scrollbar {
     width: 4px;
   }
 
   .sticky-left-column::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(128, 128, 128, 0.3);
     border-radius: 4px;
   }
 }
@@ -1418,39 +1449,57 @@ const resolveIngredientDetailsForSteps = async () => {
   font-size: clamp(1rem, 2vw, 1.15rem);
 }
 
+/* --- BILD UPLOAD BOX --- */
 .image-upload-box {
   background-color: transparent;
-  border: 1px dashed #66a182;
+  border: 2px dashed var(--q-primary);
   border-radius: 12px;
   height: clamp(200px, 35vh, 320px);
+  overflow: hidden;
 }
 
-:deep(.custom-dark-input .q-field__control) {
-  background-color: #222222 !important;
-  border-radius: 8px;
+:global(.body--dark) .image-upload-box:hover {
+  background-color: rgba(255, 255, 255, 0.05);
 }
 
-:deep(.custom-dark-input .q-field__control:before) {
+:global(.body--light) .image-upload-box:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+/* --- CUSTOM INPUT STYLING --- */
+:deep(.custom-dynamic-input .q-field__control) {
+  border-radius: 10px;
+}
+
+:global(.body--dark) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+:global(.body--light) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+:deep(.custom-dynamic-input .q-field__control:before) {
   border-bottom: none !important;
 }
 
 /* KATEGORIE SELECT FIX */
 :deep(.category-select.q-field--dense .q-field__control) {
-  min-height: 40px !important;
-  height: 40px !important;
+  min-height: 48px !important;
+  height: 48px !important;
   padding-top: 0 !important;
   display: flex;
   align-items: center;
 }
 
 :deep(.category-select .q-field__native) {
-  min-height: 40px !important;
+  min-height: 48px !important;
   display: flex;
   align-items: center;
 }
 
 :deep(.category-select .q-field__label) {
-  top: 10px !important;
+  top: 14px !important;
   transform: none !important;
   font-size: 14px !important;
 }
@@ -1459,9 +1508,8 @@ const resolveIngredientDetailsForSteps = async () => {
   display: none !important;
 }
 
+/* --- SCHRITTE --- */
 .step-container {
-  background-color: #222222;
-  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -1470,23 +1518,15 @@ const resolveIngredientDetailsForSteps = async () => {
   border-radius: 0 !important;
 }
 
-.step-action-bar {
-  border-top: 1px solid #333;
-  background-color: #1e1e1e;
-}
-
-.bg-dark-soft {
-  background-color: rgba(255, 255, 255, 0.05);
-}
-
 .drag-handle {
   touch-action: none;
 }
 
 .hover-primary:hover {
-  color: #66a182 !important;
+  color: var(--q-primary) !important;
 }
 
+/* --- VUE DRAGGABLE GHOST --- */
 .drop-ghost-line {
   position: relative;
   background: transparent !important;
@@ -1499,7 +1539,7 @@ const resolveIngredientDetailsForSteps = async () => {
   left: 0;
   right: 0;
   height: 3px;
-  background-color: #66a182;
+  background-color: var(--q-primary);
   border-radius: 2px;
 }
 </style>

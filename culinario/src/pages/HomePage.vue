@@ -206,28 +206,31 @@ const performDelete = async (recipe: RecipeFirebase) => {
 </script>
 
 <template>
-  <q-page class="bg-dark-page q-pa-md">
+  <q-page class="bg-dynamic-page q-pa-md transition-ease">
 
     <div class="max-width-container full-height column">
 
       <div class="row items-center justify-between q-mb-lg q-pt-sm header-responsive">
 
-        <h1 class="text-h4 text-weight-bold q-my-none text-white gt-sm">Meine Rezepte</h1>
+        <h1 class="text-h4 text-weight-bold q-my-none dynamic-text gt-sm">Meine Rezepte</h1>
 
         <div class="row no-wrap items-center q-gutter-sm search-wrapper">
-          <q-btn unelevated class="bg-dark border-dark hover-primary" icon="casino" text-color="white"
-            @click="pickSurpriseRecipe" style="height: 49px; width: 49px; border-radius: 14px;">
+
+          <q-btn unelevated class="dynamic-card hover-primary transition-ease" @click="pickSurpriseRecipe"
+            style="height: 49px; width: 49px; border-radius: 14px;">
+            <q-icon name="casino" class="dynamic-text" />
             <q-tooltip class="bg-primary text-white text-weight-bold">Überrasch mich!</q-tooltip>
           </q-btn>
 
           <q-input v-model="searchQuery" borderless dense placeholder="Rezept suchen..."
-            class="col search-input bg-dark" input-class="text-white">
+            class="col search-input dynamic-card transition-ease" :dark="$q.dark.isActive" input-class="dynamic-text">
             <template v-slot:prepend>
-              <q-icon name="search" color="white" size="sm" class="q-pl-sm" />
+              <q-icon name="search" class="dynamic-text-muted q-pl-sm" size="sm" />
             </template>
           </q-input>
 
-          <q-btn unelevated class="filter-btn" icon="tune" text-color="white" @click="showFilterDialog = true">
+          <q-btn unelevated class="filter-btn text-weight-bold" color="primary" icon="tune"
+            @click="showFilterDialog = true">
             <q-badge v-if="isFiltering" color="negative" floating rounded />
           </q-btn>
         </div>
@@ -235,23 +238,25 @@ const performDelete = async (recipe: RecipeFirebase) => {
 
       <q-dialog v-model="showFilterDialog" :position="$q.screen.lt.sm ? 'bottom' : 'right'"
         :full-width="$q.screen.lt.sm" :full-height="!$q.screen.lt.sm" class="filter-dialog">
-        <q-card class="bg-dark text-white q-pa-sm"
+        <q-card class="dynamic-card dynamic-text q-pa-sm"
           :class="$q.screen.lt.sm ? 'filter-card-mobile' : 'filter-card-desktop'">
+
           <q-card-section class="row items-center justify-between q-pb-none">
             <div class="text-h6 text-weight-bold">Rezepte filtern</div>
-            <q-btn icon="close" flat round dense v-close-popup class="bg-dark-page text-grey-5" size="sm" />
+            <q-btn icon="close" flat round dense v-close-popup class="dynamic-text-muted bg-dynamic-soft" size="sm" />
           </q-card-section>
 
           <q-card-section v-if="activeCategories.length > 0">
             <div class="row items-center justify-between q-mb-md">
               <div class="text-subtitle1 text-weight-bold">Rezeptkategorie</div>
-              <q-btn icon="refresh" flat round dense size="sm" color="white" @click="selectedCategory = null" />
+              <q-btn icon="refresh" flat round dense size="sm" class="dynamic-text-muted"
+                @click="selectedCategory = null" />
             </div>
             <div class="row q-gutter-sm">
               <q-chip v-for="cat in activeCategories" :key="cat.value" clickable
                 :color="selectedCategory === cat.value ? 'primary' : undefined"
-                :style="selectedCategory !== cat.value ? { backgroundColor: '#161616' } : {}" text-color="white"
-                class="custom-chip" @click="selectedCategory = selectedCategory === cat.value ? null : cat.value">
+                :class="['custom-chip', selectedCategory !== cat.value ? 'chip-inactive' : 'text-white']"
+                @click="selectedCategory = selectedCategory === cat.value ? null : cat.value">
                 {{ cat.label }}
               </q-chip>
             </div>
@@ -261,20 +266,21 @@ const performDelete = async (recipe: RecipeFirebase) => {
             <div class="row items-center justify-between q-mb-sm">
               <div class="row items-center cursor-pointer" @click="isIngredientsExpanded = !isIngredientsExpanded">
                 <div class="text-subtitle1 text-weight-bold">Zutaten</div>
-                <q-icon :name="isIngredientsExpanded ? 'expand_less' : 'expand_more'" size="sm" class="q-ml-xs"
-                  color="grey-5" />
+                <q-icon :name="isIngredientsExpanded ? 'expand_less' : 'expand_more'" size="sm"
+                  class="q-ml-xs dynamic-text-muted" />
               </div>
-              <q-btn icon="refresh" flat round dense size="sm" color="white"
+              <q-btn icon="refresh" flat round dense size="sm" class="dynamic-text-muted"
                 @click="selectedIngredients = []; ingredientSearchQuery = ''" />
             </div>
 
             <q-input v-model="ingredientSearchQuery" borderless dense placeholder="Nach Zutat filtern..."
-              class="ingredient-search bg-dark-page q-mb-md" input-class="text-white">
+              class="ingredient-search bg-dynamic-soft q-mb-md rounded-borders" :dark="$q.dark.isActive"
+              input-class="dynamic-text">
               <template v-slot:prepend>
-                <q-icon name="search" color="white" size="sm" class="q-pl-sm" />
+                <q-icon name="search" class="dynamic-text-muted q-pl-sm" size="sm" />
               </template>
               <template v-slot:append v-if="ingredientSearchQuery">
-                <q-icon name="close" color="grey-5" size="xs" class="cursor-pointer q-pr-sm"
+                <q-icon name="close" class="dynamic-text-muted cursor-pointer q-pr-sm" size="xs"
                   @click="ingredientSearchQuery = ''" />
               </template>
             </q-input>
@@ -284,12 +290,12 @@ const performDelete = async (recipe: RecipeFirebase) => {
                 <div class="row q-gutter-sm">
                   <q-chip v-for="ing in filteredIngredients" :key="ing.id" clickable
                     :color="selectedIngredients.includes(ing.id) ? 'primary' : undefined"
-                    :style="!selectedIngredients.includes(ing.id) ? { backgroundColor: '#161616' } : {}"
-                    text-color="white" class="custom-chip" @click="toggleIngredient(ing.id)">
+                    :class="['custom-chip', !selectedIngredients.includes(ing.id) ? 'chip-inactive' : 'text-white']"
+                    @click="toggleIngredient(ing.id)">
                     {{ ing.name }}
                   </q-chip>
                 </div>
-                <div v-if="filteredIngredients.length === 0" class="text-grey-5 q-mt-sm text-caption">
+                <div v-if="filteredIngredients.length === 0" class="dynamic-text-muted q-mt-sm text-caption">
                   Keine Zutat mit diesem Namen gefunden.
                 </div>
               </div>
@@ -305,7 +311,7 @@ const performDelete = async (recipe: RecipeFirebase) => {
       </div>
 
       <div v-else-if="filteredRecipes.length === 0"
-        class="text-center text-grey-6 q-pa-xl col-grow flex flex-center column">
+        class="text-center dynamic-text-muted q-pa-xl col-grow flex flex-center column">
         <q-icon name="search_off" size="4em" class="q-mb-md" />
         <div class="text-h6">Keine Rezepte gefunden</div>
         <p>Versuche es mit anderen Suchbegriffen oder Filtern.</p>
@@ -314,19 +320,20 @@ const performDelete = async (recipe: RecipeFirebase) => {
       <div v-else class="row q-col-gutter-lg">
         <div class="col-12 col-sm-6 col-md-4 col-lg-3 col-xl-3" v-for="recipe in filteredRecipes" :key="recipe.id">
 
-          <q-card class="recipe-card bg-dark text-white cursor-pointer" flat @click="openRecipe(recipe.id)">
+          <q-card class="recipe-card dynamic-card cursor-pointer" flat @click="openRecipe(recipe.id)">
             <q-img :src="recipe.image || 'placeholder.jpg'" :ratio="16 / 9" class="recipe-image">
               <div class="absolute-top-right q-pa-none bg-transparent">
-                <q-btn round flat dense icon="more_vert" color="white" @click.stop>
-                  <q-menu auto-close dark class="bg-dark-page">
+                <q-btn round flat dense icon="more_vert" color="white" class="shadow-1"
+                  style="background: rgba(0,0,0,0.3);" @click.stop>
+                  <q-menu auto-close class="dynamic-card dynamic-text">
                     <q-list>
-                      <q-item clickable @click="recipe.id && editRecipe(recipe.id)">
-                        <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                      <q-item clickable @click="recipe.id && editRecipe(recipe.id)" class="list-item-hover">
+                        <q-item-section avatar><q-icon name="edit" color="primary" /></q-item-section>
                         <q-item-section>Bearbeiten</q-item-section>
                       </q-item>
-                      <q-item clickable @click="confirmDelete(recipe)">
-                        <q-item-section avatar><q-icon name="delete" color="red-4" /></q-item-section>
-                        <q-item-section class="text-red-4">Löschen</q-item-section>
+                      <q-item clickable @click="confirmDelete(recipe)" class="list-item-hover">
+                        <q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section>
+                        <q-item-section class="text-negative">Löschen</q-item-section>
                       </q-item>
                     </q-list>
                   </q-menu>
@@ -334,8 +341,8 @@ const performDelete = async (recipe: RecipeFirebase) => {
               </div>
             </q-img>
 
-            <q-card-section class="q-py-md text-center bg-dark">
-              <div class="text-subtitle1 text-weight-bolder ellipsis">{{ recipe.name }}</div>
+            <q-card-section class="q-py-md text-center bg-transparent">
+              <div class="text-subtitle1 text-weight-bolder ellipsis dynamic-text">{{ recipe.name }}</div>
             </q-card-section>
           </q-card>
 
@@ -358,18 +365,18 @@ const performDelete = async (recipe: RecipeFirebase) => {
   width: 100%;
 }
 
-/* Ab Tablet-Größe (gt-sm): Suchleiste nicht mehr 100% breit, sondern fixiert */
+/* Ab Tablet-Größe: Suchleiste fixiert */
 @media (min-width: 1024px) {
   .search-wrapper {
     width: 400px;
   }
 }
 
-/* --- DEIN ORIGINAL DESIGN (Unverändert!) --- */
+/* --- FORMEN & INPUTS --- */
 .search-input {
   border-radius: 12px;
-  border: 1px solid #333333;
   height: 49px;
+  overflow: hidden;
 }
 
 :deep(.search-input .q-field__control) {
@@ -378,23 +385,26 @@ const performDelete = async (recipe: RecipeFirebase) => {
   flex-direction: row;
   gap: 6px;
   align-items: center;
+  padding: 0 12px;
 }
 
 .ingredient-search {
   border-radius: 12px;
-  border: 1px solid #333333;
   height: 49px;
+  overflow: hidden;
 }
 
 :deep(.ingredient-search .q-field__control) {
   height: 49px;
+  padding: 0 12px;
 }
 
+/* --- BUTTONS & CHIPS --- */
 .filter-btn {
   border-radius: 14px;
   height: 49px;
   width: 49px;
-  background-color: #66A182;
+  /* color="primary" wird im Template gesetzt */
 }
 
 .custom-chip {
@@ -403,21 +413,44 @@ const performDelete = async (recipe: RecipeFirebase) => {
   padding: 8px 16px;
   margin-right: 8px;
   margin-bottom: 8px;
+  transition: background-color 0.2s, color 0.2s;
 }
 
-.filter-card {
-  width: 100%;
-  border-radius: 24px 24px 0 0;
+/* Dynamischer Inactive-Status für Chips */
+:global(.body--dark) .chip-inactive {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+  color: #fff;
 }
 
+:global(.body--light) .chip-inactive {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+  color: #000;
+}
+
+.hover-primary:hover {
+  color: var(--q-primary) !important;
+  border-color: var(--q-primary) !important;
+}
+
+:global(.body--dark) .list-item-hover:hover {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+:global(.body--light) .list-item-hover:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+/* --- KARTEN & DIALOGE --- */
 .recipe-card {
   border-radius: 16px;
   overflow: hidden;
-  transition: transform 0.2s;
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
 
 .recipe-card:hover {
+  border-color: var(--q-primary) !important;
   transform: translateY(-4px);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--q-primary), transparent 85%);
 }
 
 .recipe-image {
@@ -440,6 +473,7 @@ const performDelete = async (recipe: RecipeFirebase) => {
 </style>
 
 <style>
+/* Überschreibt das interne Padding des Quasar Dialogs für Randlosigkeit */
 .filter-dialog .q-dialog__inner {
   padding: 0 !important;
 }

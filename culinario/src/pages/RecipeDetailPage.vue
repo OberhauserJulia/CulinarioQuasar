@@ -3,6 +3,9 @@ import { ref, onMounted, computed, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useQuasar } from 'quasar';
 import type { Content } from 'pdfmake/interfaces';
+import { auth, db } from '../firebase/index';
+import { doc, getDoc } from 'firebase/firestore';
+
 
 // 1. Zentrale Typen importieren
 import type { RecipeFirebase, ShoppingList } from '../types/index';
@@ -59,8 +62,10 @@ interface NavigatorWithWakeLock {
   };
 }
 
-interface WindowWithWebkitAudio extends Window {
+
+interface WindowWithAudioContext extends Window {
   webkitAudioContext?: typeof AudioContext;
+  AudioContext?: typeof AudioContext;
 }
 
 const route = useRoute();
@@ -73,6 +78,7 @@ const goBack = () => { void router.back(); };
 const isLoading = ref(true);
 const recipe = ref<RecipeFirebase | null>(null);
 const allRecipes = ref<RecipeFirebase[]>([]);
+const timerSound = ref('classic');
 
 const resolvedIngredients = ref<DisplayIngredient[]>([]);
 const resolvedSteps = ref<DisplayStep[]>([]);
@@ -175,22 +181,28 @@ const checkMasterInterval = () => {
 };
 
 const playAlarmSound = () => {
-  try {
-    const AudioContextClass = window.AudioContext || (window as unknown as WindowWithWebkitAudio).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+  const AudioContextClass = window.AudioContext || (window as unknown as WindowWithAudioContext).webkitAudioContext;
+  const ctx = new AudioContextClass();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  // Sound-Profile basierend auf Settings
+  if (timerSound.value === 'digital') {
+    osc.type = 'square';
+    osc.frequency.value = 440;
+  } else if (timerSound.value === 'soft') {
+    osc.type = 'sine';
+    osc.frequency.value = 330;
+  } else { // 'classic'
     osc.type = 'sine';
     osc.frequency.value = 880;
-    osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 1);
-    osc.stop(ctx.currentTime + 1);
-  } catch (e: unknown) {
-    console.error("Audio Error", e);
   }
+
+  osc.start();
+  gain.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 1.5);
+  osc.stop(ctx.currentTime + 1.5);
 };
 
 const timerFinished = (timer: ActiveTimer) => {
@@ -519,6 +531,11 @@ const closeCooking = () => {
 
 // --- INIT ---
 onMounted(async () => {
+  const userSnap = await getDoc(doc(db, 'users', auth.currentUser!.uid));
+  if (userSnap.exists()) {
+    timerSound.value = userSnap.data().timerSound || 'classic';
+  }
+
   try {
     allRecipes.value = await getRecipes();
   } catch (e) { console.error("Fehler beim Laden der Sidebar-Rezepte", e); }
@@ -621,21 +638,25 @@ onMounted(async () => {
 </script>
 
 <template>
-  <q-page class="bg-dark-page text-white full-height row no-wrap items-start">
+  <q-page class="bg-dynamic-page dynamic-text full-height row no-wrap items-start transition-ease">
 
-    <div class="recipe-sidebar gt-sm bg-dark scroll">
-      <div class="q-pa-md sticky-sidebar-header bg-dark z-top">
-        <div class="text-subtitle1 text-weight-bold text-primary text-uppercase" style="letter-spacing: 1px;">Weitere
-          Rezepte</div>
+    <div class="recipe-sidebar gt-sm bg-dynamic-sidebar dynamic-sidebar-border scroll">
+      <div class="q-pa-md sticky-sidebar-header z-top dynamic-border-bottom">
+        <div class="text-subtitle1 text-weight-bold text-primary text-uppercase" style="letter-spacing: 1px;">
+          Weitere Rezepte
+        </div>
       </div>
 
       <div class="q-pa-md q-gutter-y-md">
-        <q-card v-for="r in allRecipes" :key="r.id" class="sidebar-recipe-card bg-dark cursor-pointer relative-position"
+        <q-card v-for="r in allRecipes" :key="r.id"
+          class="sidebar-recipe-card dynamic-card cursor-pointer relative-position transition-ease"
           :class="{ 'active-recipe-card': r.id === route.params.id }" flat @click="router.push(`/recipe/${r.id}`)">
+
           <q-img :src="r.image || 'placeholder.jpg'" :ratio="16 / 9" class="sidebar-recipe-image" />
 
-          <q-card-section class="q-py-sm text-center bg-dark">
-            <div class="text-subtitle2 text-weight-bolder ellipsis" :class="{ 'text-white': r.id === route.params.id }">
+          <q-card-section class="q-py-sm text-center ">
+            <div class="text-subtitle2 text-weight-bolder ellipsis transition-ease"
+              :class="r.id === route.params.id ? 'text-primary' : 'dynamic-text'">
               {{ r.name }}
             </div>
           </q-card-section>
@@ -649,7 +670,7 @@ onMounted(async () => {
         <q-spinner-dots color="primary" size="3em" />
       </div>
 
-      <div v-else-if="!recipe" class="text-center q-pa-xl">
+      <div v-else-if="!recipe" class="text-center q-pa-xl dynamic-text-muted">
         <q-icon name="error_outline" size="4em" color="negative" />
         <div class="text-h6 q-mt-md">Rezept nicht gefunden</div>
       </div>
@@ -662,13 +683,13 @@ onMounted(async () => {
             <q-btn round flat icon="arrow_back" color="white" class="glass-btn" @click="goBack" />
             <div class="row q-gutter-sm">
               <q-btn round flat icon="more_vert" color="white" class="glass-btn">
-                <q-menu auto-close dark class="bg-dark-page">
+                <q-menu :dark="$q.dark.isActive" class="bg-dynamic-soft dynamic-text">
                   <q-list>
                     <q-item clickable :to="`/add-recipe?edit=${route.params.id}`">
-                      <q-item-section avatar><q-icon name="edit" /></q-item-section>
+                      <q-item-section avatar><q-icon name="edit" class="dynamic-text" /></q-item-section>
                     </q-item>
                     <q-item clickable @click="exportRecipe">
-                      <q-item-section avatar><q-icon name="picture_as_pdf" /></q-item-section>
+                      <q-item-section avatar><q-icon name="picture_as_pdf" class="dynamic-text" /></q-item-section>
                     </q-item>
                     <q-item clickable @click="deleteRecipeDialog">
                       <q-item-section avatar><q-icon name="delete" color="red-4" /></q-item-section>
@@ -681,55 +702,62 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="main-content-card q-pa-md q-pa-md-xl">
+        <div class="main-content-card q-pa-md q-pa-md-xl bg-dynamic-page">
 
-          <div class="row items-center justify-between q-mb-xl gt-sm sticky-desktop-header rounded-borders">
-            <h1 class="text-h4 text-weight-bold q-my-none q-pl-md">{{ recipe.name }}</h1>
+          <div
+            class="row items-center justify-between q-mb-xl gt-sm sticky-desktop-header rounded-borders dynamic-card dynamic-border">
+            <h1 class="text-h4 text-weight-bold q-my-none q-pl-md dynamic-text">{{ recipe.name }}</h1>
             <div class="row q-gutter-sm q-pr-md">
-              <q-btn flat icon="edit" color="grey-4" no-caps class="bg-dark-soft"
+              <q-btn flat icon="edit" no-caps class="dynamic-text-muted hover-primary transition-ease"
                 :to="`/add-recipe?edit=${route.params.id}`" />
-              <q-btn flat icon="picture_as_pdf" color="grey-4" no-caps class="bg-dark-soft" @click="exportRecipe" />
-              <q-btn flat icon="shopping_cart" color="grey-4" no-caps class="bg-dark-soft text-weight-bold"
+              <q-btn flat icon="picture_as_pdf" no-caps class="dynamic-text-muted hover-primary transition-ease"
+                @click="exportRecipe" />
+              <q-btn flat icon="shopping_cart" no-caps
+                class="dynamic-text-muted hover-primary transition-ease text-weight-bold"
                 @click="openShoppingListDialog" />
             </div>
           </div>
 
-          <h1 class="text-h4 text-weight-bold q-my-none q-mb-md lt-md">{{ recipe.name }}</h1>
+          <h1 class="text-h4 text-weight-bold q-my-none q-mb-md lt-md dynamic-text">{{ recipe.name }}</h1>
 
           <div class="row q-col-gutter-xl">
             <div class="col-12 col-md-5 col-lg-4">
               <q-img :src="recipe.image || 'placeholder.jpg'" class="recipe-desktop-image gt-sm q-mb-lg shadow-10" />
 
-              <div v-if="recipe.source || recipe.ovensettings" class="row items-center recipe-details-box q-mb-lg">
+              <div v-if="recipe.source || recipe.ovensettings"
+                class="row items-center recipe-details-box dynamic-card dynamic-border q-mb-lg">
                 <div class="col flex flex-center" v-if="recipe.source">
                   <a v-if="recipe.source.startsWith('http')" :href="recipe.source" target="_blank"
-                    class="text-white text-weight-bold link-no-decoration q-py-sm">
+                    class="dynamic-text text-weight-bold link-no-decoration q-py-sm hover-primary transition-ease">
                     {{ recipe.source.toLowerCase().includes('youtube') ? 'YouTube' : 'Webseite' }}
                   </a>
-                  <span v-else class="text-white text-weight-bold q-py-sm">Webseite</span>
+                  <span v-else class="dynamic-text text-weight-bold q-py-sm">Webseite</span>
                 </div>
                 <div v-if="recipe.ovensettings" class="vertical-divider"></div>
                 <div class="col flex flex-center" v-if="recipe.ovensettings">
-                  <span class="text-white text-weight-bold q-py-sm">{{ recipe.ovensettings }}</span>
+                  <span class="dynamic-text text-weight-bold q-py-sm">{{ recipe.ovensettings }}</span>
                 </div>
               </div>
 
               <div class="row items-center justify-between q-mb-md">
                 <div class="text-h6 text-primary text-weight-bold">Zutaten</div>
-                <div class="servings-adjuster bg-dark-page row items-center no-wrap">
-                  <q-btn flat dense size="sm" class="bg-dark" icon="remove" color="white"
+                <div class="servings-adjuster dynamic-card dynamic-border row items-center no-wrap">
+                  <q-btn flat dense size="sm" class="hover-primary transition-ease dynamic-text" icon="remove"
                     @click="currentServings > 1 ? currentServings-- : null" />
-                  <div class="text-weight-bold q-px-md text-subtitle1">{{ currentServings }} {{ recipeUnit }}</div>
-                  <q-btn flat dense size="sm" icon="add" class="bg-dark" color="white" @click="currentServings++" />
+                  <div class="text-weight-bold q-px-md text-subtitle1 dynamic-text">{{ currentServings }} {{ recipeUnit
+                  }}</div>
+                  <q-btn flat dense size="sm" icon="add" class="hover-primary transition-ease dynamic-text"
+                    @click="currentServings++" />
                 </div>
               </div>
 
               <div class="ingredients-list">
                 <div v-for="ing in resolvedIngredients" :key="ing.id" class="row items-center q-py-sm ingredient-row">
-                  <q-avatar size="32px" class="q-mr-md rounded-borders bg-dark shadow-1">
+                  <q-avatar size="32px" class="q-mr-md rounded-borders bg-dynamic-soft shadow-1 dynamic-border">
                     <img v-if="ing.image" :src="ing.image" style="object-fit: cover;" />
+                    <q-icon v-else name="restaurant" size="16px" class="dynamic-text-muted" />
                   </q-avatar>
-                  <div class="text-body1 text-white">
+                  <div class="text-body1 dynamic-text">
                     <span class="text-weight-bold text-primary">{{ formatAmount(ing.amount) }}</span> {{ ing.unit }} {{
                       ing.name }}
                   </div>
@@ -748,23 +776,23 @@ onMounted(async () => {
                   </q-badge>
 
                   <div v-if="step.extractedTimes.length > 0" class="row q-ml-md q-gutter-sm">
-                    <q-chip v-for="timeObj in step.extractedTimes" :key="timeObj.id" icon="timer" color="dark"
-                      text-color="primary" class="cursor-pointer shadow-1 text-weight-bold"
+                    <q-chip v-for="timeObj in step.extractedTimes" :key="timeObj.id" icon="timer"
+                      class="cursor-pointer shadow-1 text-weight-bold bg-dynamic-soft dynamic-border dynamic-text transition-ease hover-primary-bg"
                       @click="toggleTimer(timeObj.id, timeObj.seconds, timeObj.text)">
                       {{ timeObj.text }}
                     </q-chip>
                   </div>
                 </div>
 
-                <p class="text-body1 text-grey-3 step-description" v-html="step.description"></p>
+                <p class="text-body1 dynamic-text-muted step-description" v-html="step.description"></p>
 
                 <div class="row q-gutter-xs q-mt-sm" v-if="step.ingredients && step.ingredients.length > 0">
                   <div v-for="(stepIng, ingIndex) in step.ingredients" :key="ingIndex"
-                    class="step-ingredient-chip row items-center q-px-sm q-py-xs">
+                    class="step-ingredient-chip dynamic-card dynamic-border row items-center q-px-sm q-py-xs">
                     <q-avatar v-if="stepIng.image" size="20px" class="q-mr-sm bg-transparent">
                       <img :src="stepIng.image" style="object-fit: cover;" />
                     </q-avatar>
-                    <span class="text-weight-medium text-white" style="font-size: 13px;">
+                    <span class="text-weight-medium dynamic-text" style="font-size: 13px;">
                       {{ formatAmount(stepIng.amount) }} {{ stepIng.unit }} {{ stepIng.name }}
                     </span>
                   </div>
@@ -776,26 +804,25 @@ onMounted(async () => {
       </div>
 
       <q-page-sticky position="bottom-right" :offset="[18, 18]" style="z-index: 99;">
-        <q-btn color="primary" icon="restaurant" label="Kochmodus" class="kochmodus-btn text-weight-bold shadow-4"
-          no-caps unelevated @click="startCooking" />
+        <q-btn color="primary" icon="restaurant" label="Kochmodus"
+          class="kochmodus-btn text-weight-bold shadow-4 transition-ease" no-caps unelevated @click="startCooking" />
       </q-page-sticky>
 
     </div>
 
     <q-dialog v-model="showCookingMode" maximized transition-show="slide-up" transition-hide="slide-down">
-      <q-card class="bg-dark text-white full-height flex flex-center"
-        style="background-color: #111111 !important; width: 100%;" v-if="currentStepData"
+      <q-card class="bg-dynamic-page dynamic-text full-height flex flex-center" v-if="currentStepData"
         v-touch-swipe.mouse.left="nextCookingStep" v-touch-swipe.mouse.right="prevCookingStep">
 
         <div class="column no-wrap q-pa-lg full-height" style="width: 100%; max-width: 900px;">
 
           <div class="row items-start justify-between q-mb-lg q-mt-sm" style="min-height: 50px;">
-            <q-btn icon="arrow_back_ios_new" flat round color="white" class="glass-btn" @click="closeCooking" />
+            <q-btn icon="arrow_back_ios_new" flat round class="dynamic-text glass-btn" @click="closeCooking" />
 
             <div class="row q-gutter-sm justify-end" style="max-width: 70%;">
               <div v-for="timer in activeTimers" :key="timer.id" class="relative-position">
-                <q-btn icon="timer" flat rounded color="white"
-                  class="text-weight-bold active-timer-badge shadow-5 bg-dark"
+                <q-btn icon="timer" flat rounded
+                  class="text-weight-bold active-timer-badge shadow-5 bg-dynamic-soft dynamic-text dynamic-border"
                   @click="toggleTimer(timer.id, timer.originalSeconds, timer.label)">
                   <span class="q-ml-sm">{{ formatTime(timer.remainingSeconds) }}</span>
                 </q-btn>
@@ -813,7 +840,7 @@ onMounted(async () => {
               </q-badge>
             </div>
 
-            <p class="text-white q-mb-xl"
+            <p class="dynamic-text q-mb-xl"
               style="line-height: 1.6; font-weight: 400; font-size: clamp(1.2rem, 3vw, 1.8rem);">
               {{ currentStepData.description }}
             </p>
@@ -821,7 +848,8 @@ onMounted(async () => {
             <div class="row q-gutter-md q-mb-xl" v-if="currentStepData.extractedTimes.length > 0">
               <q-btn v-for="timeObj in currentStepData.extractedTimes" :key="timeObj.id" outline rounded
                 :color="getActiveTimerDisplay(timeObj.id) ? 'positive' : 'grey-5'"
-                class="text-weight-bold shadow-2 timer-start-btn"
+                class="text-weight-bold shadow-2 timer-start-btn dynamic-text"
+                :class="!getActiveTimerDisplay(timeObj.id) ? 'dynamic-border bg-dynamic-soft' : ''"
                 @click="toggleTimer(timeObj.id, timeObj.seconds, timeObj.text)">
                 <q-icon :name="getActiveTimerDisplay(timeObj.id) ? 'stop_circle' : 'play_circle'" size="sm"
                   class="q-mr-sm" />
@@ -831,11 +859,11 @@ onMounted(async () => {
 
             <div class="row q-gutter-sm" v-if="currentStepData.ingredients?.length">
               <div v-for="(stepIng, ingIndex) in currentStepData.ingredients" :key="ingIndex"
-                class="step-ingredient-chip row items-center q-px-md q-py-sm bg-dark">
-                <q-avatar v-if="stepIng.image" size="28px" class="q-mr-sm">
+                class="step-ingredient-chip row items-center q-px-md q-py-sm bg-dynamic-soft dynamic-border">
+                <q-avatar v-if="stepIng.image" size="28px" class="q-mr-sm bg-transparent">
                   <img :src="stepIng.image" />
                 </q-avatar>
-                <span class="text-weight-bold" style="font-size: clamp(0.9rem, 2vw, 1.2rem);">
+                <span class="text-weight-bold dynamic-text" style="font-size: clamp(0.9rem, 2vw, 1.2rem);">
                   {{ formatAmount(stepIng.amount) }} {{ stepIng.unit }} {{ stepIng.name }}
                 </span>
               </div>
@@ -857,35 +885,36 @@ onMounted(async () => {
 
     <q-dialog v-model="showShoppingListDialog" :position="$q.screen.lt.sm ? 'bottom' : 'right'"
       :full-width="$q.screen.lt.sm" :full-height="!$q.screen.lt.sm">
-      <q-card class="column no-wrap text-white shopping-list-drawer">
+      <q-card class="column no-wrap dynamic-text bg-dynamic-page shopping-list-drawer">
         <q-card-section class="row items-center q-pb-none q-pt-md">
           <div class="text-h6 text-weight-bold">Auf die Einkaufsliste</div>
           <q-space />
-          <q-btn icon="close" flat round dense color="grey-5" v-close-popup />
+          <q-btn icon="close" flat round dense class="dynamic-text-muted" v-close-popup />
         </q-card-section>
 
         <q-card-section class="q-py-sm row items-center justify-between">
-          <span class="text-grey-4 text-subtitle2">Zutaten auswählen:</span>
+          <span class="dynamic-text-muted text-subtitle2">Zutaten auswählen:</span>
           <q-btn flat dense color="primary"
             :label="selectedIngredientIds.length === resolvedIngredients.length ? 'Auswahl aufheben' : 'Alle auswählen'"
             @click="selectAllIngredients" no-caps class="text-weight-bold" />
         </q-card-section>
 
         <q-card-section class="col scroll q-pt-none">
-          <q-list dark separator class="bg-dark" style="border-radius: 12px;">
+          <q-list separator class="bg-dynamic-soft dynamic-border" style="border-radius: 12px;">
             <q-item v-for="ing in resolvedIngredients" :key="ing.id" tag="label" v-ripple class="q-py-md">
               <q-item-section avatar>
                 <q-checkbox v-model="selectedIngredientIds" :val="ing.id" color="primary" keep-color />
               </q-item-section>
               <q-item-section>
-                <q-item-label class="text-weight-medium text-body1">{{ ing.name }}</q-item-label>
-                <q-item-label caption class="text-grey-5">{{ formatAmount(ing.amount) }} {{ ing.unit }}</q-item-label>
+                <q-item-label class="text-weight-medium text-body1 dynamic-text">{{ ing.name }}</q-item-label>
+                <q-item-label caption class="dynamic-text-muted">{{ formatAmount(ing.amount) }} {{ ing.unit
+                }}</q-item-label>
               </q-item-section>
             </q-item>
           </q-list>
         </q-card-section>
 
-        <q-card-actions class="q-px-md q-pb-lg q-pt-md bg-dark">
+        <q-card-actions class="q-px-md q-pb-lg q-pt-md bg-dynamic-page">
           <q-btn color="primary" class="full-width q-py-sm shadow-4"
             style="border-radius: 12px; font-size: 16px; font-weight: bold;"
             :label="`Hinzufügen (${selectedIngredientIds.length})`" :loading="isAddingToCart" unelevated
@@ -893,10 +922,34 @@ onMounted(async () => {
         </q-card-actions>
       </q-card>
     </q-dialog>
+
   </q-page>
 </template>
 
 <style scoped>
+:global(.body--dark) .bg-dynamic-page {
+  background-color: #121212;
+}
+
+:global(.body--light) .bg-dynamic-page {
+  background-color: #f4f6f8;
+}
+
+/* --- GLOBALES DESIGN & LAYOUT --- */
+.transition-ease {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.hover-primary:hover {
+  color: var(--q-primary) !important;
+}
+
+.hover-primary-bg:hover {
+  background-color: color-mix(in srgb, var(--q-primary), transparent 85%) !important;
+  border-color: var(--q-primary) !important;
+  color: var(--q-primary) !important;
+}
+
 .recipe-sidebar {
   flex: 0 0 240px;
   min-width: 240px;
@@ -905,15 +958,15 @@ onMounted(async () => {
   top: 0;
   align-self: flex-start;
   height: 100vh;
-
-  /* Scrollen deaktivieren */
   overflow: hidden !important;
+}
 
-  background-color: #1a1a1a;
+.dynamic-sidebar-border {
+  border-right: 1px solid rgba(0, 0, 0, 0.12);
+}
 
-  /* Sichtbare Border nach rechts */
-  border-right: 1.5px solid #333333 !important;
-  border-left: 1.5px solid #333333 !important;
+:global(.body--dark) .dynamic-sidebar-border {
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .recipe-sidebar::-webkit-scrollbar {
@@ -923,25 +976,25 @@ onMounted(async () => {
 .sticky-sidebar-header {
   position: sticky;
   top: 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+:global(.body--dark) .sticky-sidebar-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-/* Die neuen Mini-Karten */
+/* Sidebar Recipe Cards */
 .sidebar-recipe-card {
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: transform 0.2s, border-color 0.2s;
 }
 
 .sidebar-recipe-card:hover {
   transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .active-recipe-card {
-  border-color: #66a182 !important;
-  /* Dein Primary-Grün */
-  box-shadow: 0 0 0 1px #66a182;
+  border-color: var(--q-primary) !important;
+  box-shadow: 0 0 0 1px var(--q-primary) !important;
 }
 
 .sidebar-recipe-image {
@@ -970,23 +1023,21 @@ onMounted(async () => {
     position: sticky;
     top: 0;
     z-index: 100;
-    background-color: rgba(22, 22, 22, 0.95);
+    background-color: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     padding-top: 16px;
     padding-bottom: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
   }
 
-  /* Kochmodus Button wandert nach unten rechts auf Desktop */
+  :global(.body--dark) .sticky-desktop-header {
+    background-color: rgba(22, 22, 22, 0.95);
+  }
+
   .kochmodus-btn {
     border-radius: 12px;
     padding: 12px 24px;
     font-size: 16px;
   }
-}
-
-.bg-dark-soft {
-  background-color: rgba(255, 255, 255, 0.05);
 }
 
 /* MOBILE OPTIMIERUNGEN */
@@ -1007,7 +1058,6 @@ onMounted(async () => {
   .main-content-card {
     border-radius: 32px 32px 0 0;
     margin-top: -40px;
-    background-color: #161616;
   }
 }
 
@@ -1033,24 +1083,23 @@ onMounted(async () => {
 .step-description {
   line-height: 1.7;
   white-space: pre-wrap;
-  color: #e0e0e0;
   font-size: 1.1rem;
 }
 
 .ingredient-row {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+:global(.body--dark) .ingredient-row {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .recipe-details-box {
-  background-color: #1c1c1c;
   border-radius: 16px;
   min-height: 54px;
-  border: 1px solid #333;
 }
 
 .step-ingredient-chip {
-  background-color: #1c1c1c;
-  border: 1px solid #333;
   border-radius: 8px;
   transition: transform 0.2s;
 }
@@ -1062,36 +1111,40 @@ onMounted(async () => {
 .vertical-divider {
   width: 1px;
   height: 24px;
-  background-color: #444;
+  background-color: rgba(0, 0, 0, 0.15);
 }
 
+:global(.body--dark) .vertical-divider {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Der Glass-Button bleibt dunkel-transparent, da er meist über Bildern liegt */
 .glass-btn {
-  background: rgba(30, 30, 30, 0.6);
+  background: rgba(30, 30, 30, 0.5);
   backdrop-filter: blur(8px);
+  color: white !important;
 }
 
 .servings-adjuster {
   border-radius: 12px;
   padding: 4px;
-  border: 1px solid #333;
 }
 
 /* NEUE TIMER STYLES */
 .active-timer-badge {
-  border: 1px solid #4CAF50;
+  border: 1px solid var(--q-primary);
   border-radius: 16px;
   transition: all 0.3s ease;
 }
 
 .active-timer-badge:hover {
-  background-color: rgba(76, 175, 80, 0.2) !important;
+  background-color: color-mix(in srgb, var(--q-primary), transparent 80%) !important;
 }
 
 .timer-start-btn {
   border-width: 2px;
   font-size: 16px;
   padding: 8px 24px;
-  background-color: rgba(255, 255, 255, 0.05);
 }
 
 .link-no-decoration {
@@ -1099,7 +1152,6 @@ onMounted(async () => {
 }
 
 .shopping-list-drawer {
-  background-color: #1c1c1c !important;
   display: flex;
   flex-direction: column;
   margin: 0 !important;

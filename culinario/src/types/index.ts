@@ -12,6 +12,8 @@ export interface Ingredient {
   image: string;
   name: string;
   plural: string;
+  isVerified?: boolean;
+  createdBy?: string;
 }
 export type IngredientFirebase = WithId<Ingredient>;
 

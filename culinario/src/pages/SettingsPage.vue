@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
-import { useQuasar } from 'quasar';
-import { collection, getDocs, doc, deleteDoc, getDoc } from 'firebase/firestore';
+import { useQuasar, copyToClipboard, setCssVar } from 'quasar';
+import { collection, getDocs, doc, deleteDoc, getDoc, writeBatch } from 'firebase/firestore';
 import { useRouter } from 'vue-router';
 import { db, auth } from '../firebase/index';
-import { signOut } from 'firebase/auth';
+import { signOut, updateEmail, updatePassword } from 'firebase/auth';
 
-// 1. Typen aus index.ts
+// 1. Typen importieren
 import type { IngredientFirebase, Markets, WithId, RecipeFirebase } from '../types/index';
 
-// 2. Service Funktionen
+// 2. Service Funktionen importieren
 import {
   getIngredients,
   updateIngredient,
@@ -25,314 +25,210 @@ import {
   leaveWG,
   updateUserWGPrefs,
   updateUserProfile,
-  updateUserPrefs
+  updateUserPrefs,
+  exportRecipeData,
+  deleteUserAccount,
+  getGroupMembers,
+  addIngredient
 } from '../firebase/services';
 
 const $q = useQuasar();
+const router = useRouter();
 const tab = ref('general');
 
-const keepScreenOn = ref(true);
-const timerSound = ref('classic');
+// ==========================================
+// --- EINMALIGER JSON-UPLOAD (SEED) ---
+// ==========================================
+const seedDatabaseWithJson = (event: Event) => {
+  const file = (event.target as HTMLInputElement).files?.[0];
+  if (!file) return;
 
-const router = useRouter();
-const handleLogout = async () => {
-  try {
-    await signOut(auth);
-    $q.notify({ type: 'info', message: 'Erfolgreich abgemeldet.' });
-    void router.push('/login');
-  } catch (error) {
-    console.error("Fehler beim Logout:", error);
-    $q.notify({ type: 'negative', message: 'Fehler beim Abmelden.' });
-  }
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      $q.loading.show({ message: 'Datenbank wird befüllt... Bitte warten, das kann ein paar Sekunden dauern.' });
+
+      const rawData = JSON.parse(e.target?.result as string);
+
+      // Filtern, falls leere Objekte drin sind
+      const validData = rawData.filter((ing: any) => ing.name && ing.name.trim() !== '');
+
+      // In 400er Blöcke aufteilen (Firebase Limit ist 500 pro Batch)
+      const chunks = [];
+      for (let i = 0; i < validData.length; i += 400) {
+        chunks.push(validData.slice(i, i + 400));
+      }
+
+      // Blöcke hochladen
+      for (const chunk of chunks) {
+        const batch = writeBatch(db);
+        chunk.forEach((ing: any) => {
+          // Generiert eine neue automatische ID für jede Zutat
+          const newDocRef = doc(collection(db, 'ingredients'));
+          batch.set(newDocRef, ing);
+        });
+        await batch.commit(); // Schreibt die 400 Zutaten auf einmal
+      }
+
+      $q.notify({ type: 'positive', message: `${validData.length} Zutaten erfolgreich hochgeladen!`, icon: 'check_circle' });
+
+      // Liste in der UI neu laden
+      await loadGlobalData();
+
+    } catch (err) {
+      console.error("Upload Fehler:", err);
+      $q.notify({ type: 'negative', message: 'Fehler beim Parsen oder Hochladen der JSON.' });
+    } finally {
+      $q.loading.hide();
+      // Input-Feld zurücksetzen, damit man dieselbe Datei nochmal wählen könnte
+      (event.target as HTMLInputElement).value = '';
+    }
+  };
+
+  reader.readAsText(file);
 };
 
-// --- ALLGEMEINE EINSTELLUNGEN ---
+// ==========================================
+// --- ALLGEMEINE SETTINGS & DESIGN ---
+// ==========================================
 const isDarkMode = ref($q.dark.isActive);
 const defaultPortions = ref(2);
+const primaryColor = ref('#66a182');
+
+const presetColors = ['#66a182', '#4a90e2', '#e67e22', '#9b59b6', '#f1c40f'];
+const isCustomColor = computed(() => !presetColors.includes(primaryColor.value.toLowerCase()));
 
 watch(isDarkMode, (val) => {
   $q.dark.set(val);
-  localStorage.setItem('darkMode', val ? 'true' : 'false');
 });
 
 watch(defaultPortions, (val) => {
   localStorage.setItem('defaultPortions', val.toString());
 });
 
-// --- GLOBALE DATEN (Für Zutaten-Logik) ---
-const allIngredients = ref<IngredientFirebase[]>([]);
-const allRecipes = ref<RecipeFirebase[]>([]);
-
-// --- ZUTATEN BILDER LOGIK ---
-const ingredientsWithoutImage = ref<IngredientFirebase[]>([]);
-const isUploadingMap = ref<Record<string, boolean>>({});
-
-// Cloudinary Config
-const CLOUDINARY_CLOUD_NAME = 'ddwxwy7j0';
-const CLOUDINARY_UPLOAD_PRESET = 'ml_default';
-
-const loadGlobalData = async () => {
-  try {
-    const [ings, recs] = await Promise.all([getIngredients(), getRecipes()]);
-    allIngredients.value = ings;
-    allRecipes.value = recs;
-    ingredientsWithoutImage.value = ings.filter(i => !i.image || i.image.trim() === '');
-  } catch (error: unknown) {
-    console.error("Fehler beim Laden der globalen Daten:", error);
-  }
+const applyPrimaryColor = (color: string) => {
+  setCssVar('primary', color);
+  setCssVar('accent', color);
 };
 
-const uploadImage = async (file: File | null, ingredientId: string) => {
-  if (!file) return;
-  isUploadingMap.value[ingredientId] = true;
+watch(primaryColor, (val) => {
+  applyPrimaryColor(val);
+});
 
+// ==========================================
+// --- ACCOUNT SICHERHEIT ---
+// ==========================================
+const newEmail = ref(auth.currentUser?.email || '');
+const newPassword = ref('');
+const confirmPassword = ref('');
+
+const handleUpdateEmail = async () => {
+  if (!newEmail.value || newEmail.value === auth.currentUser?.email) return;
   try {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-
-    const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
-      method: 'POST', body: formData,
+    await updateEmail(auth.currentUser!, newEmail.value);
+    $q.notify({ type: 'positive', message: 'E-Mail Adresse aktualisiert!' });
+  } catch (error: unknown) {
+    console.error("Email update error:", error);
+    $q.notify({
+      type: 'negative',
+      message: 'Fehler: Bitte logge dich erneut ein, um diese Änderung zu bestätigen.'
     });
+  }
+};
 
-    if (!response.ok) throw new Error('Upload fehlgeschlagen');
-    const data = await response.json();
-
-    await updateIngredient(ingredientId, { image: data.secure_url });
-    await loadGlobalData();
-    $q.notify({ type: 'positive', message: 'Bild hochgeladen & gespeichert!' });
-
+const handleUpdatePassword = async () => {
+  if (!newPassword.value || newPassword.value !== confirmPassword.value) {
+    $q.notify({ type: 'warning', message: 'Passwörter stimmen nicht überein.' });
+    return;
+  }
+  try {
+    await updatePassword(auth.currentUser!, newPassword.value);
+    $q.notify({ type: 'positive', message: 'Passwort erfolgreich geändert!' });
+    newPassword.value = '';
+    confirmPassword.value = '';
   } catch (error: unknown) {
-    console.error("Fehler beim Upload:", error);
-    $q.notify({ type: 'negative', message: 'Upload Fehler' });
-  } finally {
-    isUploadingMap.value[ingredientId] = false;
+    console.error("Password update error:", error);
+    $q.notify({ type: 'negative', message: 'Fehler beim Ändern des Passworts.' });
   }
 };
 
-// --- BILDER-GALERIE (Aus bestehenden wählen) ---
-const showImagePicker = ref(false);
-const imagePickerTargetId = ref<string | null>(null);
+// ==========================================
+// --- NUTZER-PROFIL & PRÄFERENZEN ---
+// ==========================================
+const displayName = ref('');
+const unitPreference = ref('metric');
+const keepScreenOn = ref(true);
+const timerSound = ref('classic');
+const weekStart = ref(1);
+const hidePastDays = ref(true);
+const autoCleanupList = ref(false); // NEU: Auto-Aufräumen
 
-const uniqueExistingImages = computed(() => {
-  const images = new Set<string>();
-  allIngredients.value.forEach(ing => {
-    if (ing.image) images.add(ing.image);
+const updateProfileName = () => {
+  if (!displayName.value.trim()) return;
+  void updateUserProfile({ name: displayName.value.trim() });
+  $q.notify({ type: 'positive', message: 'Name aktualisiert', timeout: 800 });
+};
+
+watch([unitPreference, keepScreenOn, timerSound, weekStart, hidePastDays, autoCleanupList, isDarkMode, defaultPortions, primaryColor], (newVals) => {
+  void updateUserPrefs({
+    unitPreference: newVals[0],
+    keepScreenOn: newVals[1],
+    timerSound: newVals[2],
+    weekStart: newVals[3],
+    hidePastDays: newVals[4],
+    autoCleanupList: newVals[5],
+    isDarkMode: newVals[6],
+    defaultPortions: newVals[7],
+    primaryColor: newVals[8]
   });
-  return Array.from(images);
 });
 
-const openImagePicker = (ingredientId: string) => {
-  imagePickerTargetId.value = ingredientId;
-  showImagePicker.value = true;
-};
-
-const selectExistingImage = async (imgUrl: string) => {
-  if (!imagePickerTargetId.value) return;
-  try {
-    await updateIngredient(imagePickerTargetId.value, { image: imgUrl });
-    $q.notify({ type: 'positive', message: 'Bild erfolgreich zugewiesen!' });
-    showImagePicker.value = false;
-    await loadGlobalData();
-  } catch (e) {
-    console.error("Fehler beim Zuweisen des Bildes:", e);
-    $q.notify({ type: 'negative', message: 'Fehler beim Zuweisen.' });
-  }
-};
-
-// --- ZUTATEN LÖSCHEN & AUSTAUSCHEN LOGIK ---
-const showDeleteDialog = ref(false);
-const isDeleting = ref(false);
-const ingredientToDelete = ref<IngredientFirebase | null>(null);
-const recipesUsingIngredient = ref<RecipeFirebase[]>([]);
-const swapIngredientId = ref<string | null>(null);
-
-const allIngredientsOptions = computed(() => {
-  return allIngredients.value
-    .filter(i => i.id !== ingredientToDelete.value?.id) // Die zu löschende Zutat ausblenden
-    .map(i => ({ label: i.name, value: i.id }))
-    .sort((a, b) => a.label.localeCompare(b.label));
-});
-
-const getIngredientIdHelper = (ing: { ingredientID?: string; ingredientId?: string }): string => {
-  return ing.ingredientID || ing.ingredientId || '';
-};
-
-const initiateDelete = (ing: IngredientFirebase) => {
-  ingredientToDelete.value = ing;
-  swapIngredientId.value = null;
-
-  // 1. Prüfen, in welchen Rezepten diese Zutat vorkommt
-  recipesUsingIngredient.value = allRecipes.value.filter(recipe => {
-    const inIngredients = recipe.ingredients?.some(i => getIngredientIdHelper(i) === ing.id);
-    const inSteps = recipe.preparationSteps?.some(step => step.ingredients?.some(i => getIngredientIdHelper(i) === ing.id));
-    return inIngredients || inSteps;
-  });
-
-  showDeleteDialog.value = true;
-};
-
-const executeDeleteAndSwap = async () => {
-  if (!ingredientToDelete.value) return;
-  isDeleting.value = true;
-
-  try {
-    const oldId = ingredientToDelete.value.id;
-    const newId = swapIngredientId.value;
-
-    // 1. Rezepte updaten (falls sie verwendet wird)
-    if (recipesUsingIngredient.value.length > 0) {
-      if (!newId) {
-        $q.notify({ type: 'warning', message: 'Bitte wähle eine Zutat als Ersatz aus.' });
-        isDeleting.value = false;
-        return;
-      }
-
-      for (const recipe of recipesUsingIngredient.value) {
-        if (!recipe.id) continue;
-
-        // Deep Copy erstellen
-        const updatedRecipe = JSON.parse(JSON.stringify(recipe)) as RecipeFirebase;
-
-        // In Zutatenliste austauschen
-        updatedRecipe.ingredients?.forEach((i: { ingredientID?: string; ingredientId?: string }) => {
-          if (getIngredientIdHelper(i) === oldId) {
-            i.ingredientID = newId;
-            if (i.ingredientId) i.ingredientId = newId; // Fallback überschreiben
-          }
-        });
-
-        // In Schritten austauschen
-        updatedRecipe.preparationSteps?.forEach((step: { ingredients?: { ingredientID?: string; ingredientId?: string }[] }) => {
-          step.ingredients?.forEach((i: { ingredientID?: string; ingredientId?: string }) => {
-            if (getIngredientIdHelper(i) === oldId) {
-              i.ingredientID = newId;
-              if (i.ingredientId) i.ingredientId = newId;
-            }
-          });
-        });
-
-        await updateRecipe(recipe.id, updatedRecipe);
-      }
-    }
-
-    // 2. Zutat final aus der Datenbank löschen
-    await deleteDoc(doc(db, 'ingredients', oldId));
-
-    $q.notify({ type: 'positive', message: 'Zutat erfolgreich gelöscht (und ggf. in Rezepten ersetzt)!' });
-    showDeleteDialog.value = false;
-    await loadGlobalData();
-
-  } catch (error) {
-    console.error("Fehler beim Löschen:", error);
-    $q.notify({ type: 'negative', message: 'Fehler beim Löschen.' });
-  } finally {
-    isDeleting.value = false;
-  }
-};
-
-
-// --- SUPERMARKT LOGIK (Unverändert) ---
-const supermarkets = ref<WithId<Markets>[]>([]);
-const allCategories = ref<{ id: string, name: string }[]>([]);
-const showMarketDialog = ref(false);
-const isEditMode = ref(false);
-
-const editingMarket = ref<Markets>({ name: '', categoryOrder: [] });
-const editingId = ref<string | null>(null);
-
-const loadSupermarketsAndCategories = async () => {
-  try {
-    const catSnap = await getDocs(collection(db, 'categories'));
-    const cats: { id: string, name: string }[] = [];
-    catSnap.forEach(d => { if (d.data().name) cats.push({ id: d.id, name: d.data().name }); });
-    allCategories.value = cats;
-    supermarkets.value = await getMarkets();
-  } catch (error: unknown) { console.error(error); }
-};
-
-const availableCategoriesForEdit = computed(() => {
-  const selectedIds = editingMarket.value.categoryOrder || [];
-  return allCategories.value.filter(cat => !selectedIds.includes(cat.id));
-});
-
-const selectedCategoriesObjects = computed(() => {
-  const order = editingMarket.value.categoryOrder || [];
-  return order.map(id => allCategories.value.find(c => c.id === id)).filter(Boolean) as { id: string, name: string }[];
-});
-
-const openAddMarket = () => {
-  isEditMode.value = false; editingId.value = null; editingMarket.value = { name: '', categoryOrder: [] };
-  showMarketDialog.value = true;
-};
-
-const openEditMarket = (market: WithId<Markets>) => {
-  isEditMode.value = true; editingId.value = market.id; editingMarket.value = { name: market.name, categoryOrder: [...market.categoryOrder] };
-  showMarketDialog.value = true;
-};
-
-const saveMarket = async () => {
-  try {
-    if (!editingMarket.value.name.trim()) return;
-    if (isEditMode.value && editingId.value) { await updateMarket(editingId.value, editingMarket.value); $q.notify({ type: 'positive', message: 'Aktualisiert' }); }
-    else { await addMarket(editingMarket.value); $q.notify({ type: 'positive', message: 'Erstellt' }); }
-    await loadSupermarketsAndCategories(); showMarketDialog.value = false;
-  } catch (error) { console.error(error); $q.notify({ type: 'negative', message: 'Fehler' }); }
-};
-
-const performDeleteMarket = async (market: WithId<Markets>) => {
-  try { await deleteMarket(market.id); await loadSupermarketsAndCategories(); $q.notify({ type: 'positive', message: 'Gelöscht' }); }
-  catch (error) { console.error(error); $q.notify({ type: 'negative', message: 'Fehler' }); }
-};
-
-const confirmDeleteMarket = (market: WithId<Markets>) => {
-  $q.dialog({ title: 'Löschen', message: `"${market.name}" wirklich löschen?`, cancel: true, persistent: true, color: 'negative' }).onOk(() => { void performDeleteMarket(market); });
-};
-
-const addCategoryToMarket = (catId: string) => { editingMarket.value.categoryOrder.push(catId); };
-const removeCategoryFromMarket = (catId: string) => { editingMarket.value.categoryOrder = editingMarket.value.categoryOrder.filter(id => id !== catId); };
-const moveCategory = (index: number, direction: -1 | 1) => {
-  const arr = editingMarket.value.categoryOrder; const newIndex = index + direction;
-  if (newIndex < 0 || newIndex >= arr.length) return;
-  const itemA = arr[index]; const itemB = arr[newIndex];
-  if (itemA !== undefined && itemB !== undefined) { arr[index] = itemB; arr[newIndex] = itemA; }
-};
-
-// --- WG LOGIK ---
+// ==========================================
+// --- WG-VERWALTUNG ---
+// ==========================================
 const wgInfo = ref<{ id: string, name: string, code: string } | null>(null);
+const wgMembers = ref<{ id: string, name: string, email: string }[]>([]);
 const createWgName = ref('');
 const joinWgCode = ref('');
 const isWgProcessing = ref(false);
 const shareMealPlan = ref(true);
 const shareShoppingList = ref(true);
-const displayName = ref('');
-const unitPreference = ref('metric');
+
+const copyCode = (code: string) => {
+  copyToClipboard(code).then(() => {
+    $q.notify({ type: 'positive', message: 'Code kopiert!', icon: 'content_copy' });
+  }).catch(() => { });
+};
 
 const loadWgData = async () => {
   wgInfo.value = await getWGInfo();
-
+  if (wgInfo.value) {
+    wgMembers.value = await getGroupMembers();
+  }
   const userSnap = await getDoc(doc(db, 'users', auth.currentUser!.uid));
   if (userSnap.exists()) {
     const data = userSnap.data();
     displayName.value = data.name || '';
     unitPreference.value = data.unitPreference || 'metric';
-
     keepScreenOn.value = data.keepScreenOn ?? true;
     timerSound.value = data.timerSound || 'classic';
-
+    weekStart.value = data.weekStart ?? 1;
+    hidePastDays.value = data.hidePastDays ?? true;
+    autoCleanupList.value = data.autoCleanupList ?? false;
     shareMealPlan.value = data.shareMealPlan ?? true;
     shareShoppingList.value = data.shareShoppingList ?? true;
-  }
-};
 
-const updateProfileName = async () => {
-  if (!displayName.value.trim()) return;
-  try {
-    await updateUserProfile({ name: displayName.value.trim() });
-    $q.notify({ type: 'positive', message: 'Profilname aktualisiert!', timeout: 1000 });
-  } catch (e) {
-    console.error(e);
-    $q.notify({ type: 'negative', message: 'Fehler beim Speichern.' });
+    if (data.isDarkMode !== undefined) {
+      isDarkMode.value = data.isDarkMode;
+      $q.dark.set(data.isDarkMode);
+    }
+    if (data.defaultPortions !== undefined) {
+      defaultPortions.value = data.defaultPortions;
+    }
+    if (data.primaryColor) {
+      primaryColor.value = data.primaryColor;
+      applyPrimaryColor(data.primaryColor);
+    }
   }
 };
 
@@ -343,13 +239,7 @@ const handleCreateWG = async () => {
     await createWG(createWgName.value);
     await loadWgData();
     createWgName.value = '';
-    $q.notify({ type: 'positive', message: 'WG erfolgreich gegründet!' });
-  } catch (e) {
-    console.error("Fehler beim Gründen der WG:", e);
-    $q.notify({ type: 'negative', message: 'Fehler beim Gründen der WG.' });
-  } finally {
-    isWgProcessing.value = false;
-  }
+  } finally { isWgProcessing.value = false; }
 };
 
 const handleJoinWG = async () => {
@@ -359,67 +249,499 @@ const handleJoinWG = async () => {
     const wgName = await joinWG(joinWgCode.value);
     await loadWgData();
     joinWgCode.value = '';
-
-    // GANZ WICHTIG: Die App neu laden, damit alle Rezepte der neuen WG gezogen werden!
-    $q.notify({ type: 'positive', message: `Erfolgreich der WG "${wgName}" beigetreten!` });
-    setTimeout(() => { window.location.reload(); }, 1500);
-
-  } catch (e: unknown) { // <-- 'any' durch 'unknown' ersetzt
-    // Wir prüfen sauber, ob es ein echtes Error-Objekt ist
-    const errorMessage = e instanceof Error ? e.message : 'Fehler beim Beitritt.';
-    $q.notify({ type: 'negative', message: errorMessage });
-  } finally {
-    isWgProcessing.value = false;
-  }
+    $q.notify({ type: 'positive', message: `Beigetreten: ${wgName}` });
+    setTimeout(() => { window.location.reload(); }, 1000);
+  } catch (e: unknown) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Fehler' });
+  } finally { isWgProcessing.value = false; }
 };
 
 const handleLeaveWG = () => {
-  $q.dialog({
-    title: 'WG verlassen',
-    message: 'Möchtest du diese WG wirklich verlassen? Du hast danach keinen Zugriff mehr auf diese Rezepte und den Wochenplan.',
-    cancel: true, persistent: true, color: 'negative'
-  }).onOk(() => {
-    void (async () => {
-      isWgProcessing.value = true;
-      try {
+  $q.dialog({ title: 'WG verlassen', cancel: true, color: 'negative' })
+    .onOk(() => {
+      void (async () => {
+        isWgProcessing.value = true;
         await leaveWG();
-        $q.notify({ type: 'info', message: 'WG verlassen.' });
-        setTimeout(() => { window.location.reload(); }, 1000);
-      } catch (e) {
-        console.error("Fehler beim Verlassen der WG:", e);
-        $q.notify({ type: 'negative', message: 'Fehler beim Verlassen.' });
+        window.location.reload();
+      })();
+    });
+};
+
+watch([shareMealPlan, shareShoppingList], () => {
+  void updateUserWGPrefs({ shareMealPlan: shareMealPlan.value, shareShoppingList: shareShoppingList.value });
+});
+
+// ==========================================
+// --- DATEN-MANAGEMENT & AUTH ---
+// ==========================================
+const handleExport = () => {
+  $q.loading.show({ message: 'Backup wird erstellt...' });
+  void (async () => {
+    try { await exportRecipeData(); } finally { $q.loading.hide(); }
+  })();
+};
+
+const confirmAccountDeletion = () => {
+  $q.dialog({ title: '⚠️ Account löschen', message: 'Alle Daten werden gelöscht!', cancel: true, color: 'negative' })
+    .onOk(() => {
+      void (async () => {
+        await deleteUserAccount();
+        await signOut(auth);
+        void router.push('/login');
+      })();
+    });
+};
+
+const handleLogout = async () => {
+  await signOut(auth);
+  void router.push('/login');
+};
+
+// ==========================================
+// --- ZUTATEN-BILDER LOGIK ---
+// ==========================================
+const allIngredients = ref<IngredientFirebase[]>([]);
+const ingredientEdits = ref<Record<string, { plural: string; categoryId: string }>>({});
+const allRecipes = ref<RecipeFirebase[]>([]);
+const ingredientsWithoutImage = ref<IngredientFirebase[]>([]);
+const isUploadingMap = ref<Record<string, boolean>>({});
+const showAddIngredientDialog = ref(false);
+const newIngredientImageFile = ref<File | null>(null);
+
+// Prüft, ob der eingeloggte Nutzer der Admin ist
+const isSpecialAdmin = computed(() => auth.currentUser?.uid === 'D6IlIc3FXgbBtDTij1VZgvgliTG3');
+
+// Funktion zum Löschen des Bildes
+const removeImage = (ingredientId: string) => { // async hier nicht zwingend nötig
+  $q.dialog({
+    title: 'Bild entfernen',
+    message: 'Möchtest du das Bild dieser Zutat wirklich löschen?',
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    // Wir nutzen 'void', um ESLint zu beruhigen
+    void (async () => {
+      try {
+        $q.loading.show({ message: 'Bild wird entfernt...' });
+
+        // In Firebase das Bild-Feld auf einen leeren String setzen
+        await updateIngredient(ingredientId, { image: '' });
+
+        // Lokale Daten neu laden
+        await loadGlobalData();
+
+        $q.notify({ type: 'positive', message: 'Bild erfolgreich entfernt.' });
+      } catch (error) {
+        console.error("Fehler beim Löschen des Bildes:", error);
+        $q.notify({ type: 'negative', message: 'Bild konnte nicht gelöscht werden.' });
       } finally {
-        isWgProcessing.value = false;
+        $q.loading.hide();
       }
     })();
   });
 };
 
-watch(keepScreenOn, async (val) => {
-  await updateUserPrefs({ keepScreenOn: val });
+const newIngredient = ref({
+  name: '',
+  plural: '',
+  categoryId: '',
+  image: '',
+  isSystem: true // Standardmäßig true für den Admin
 });
 
-watch(timerSound, async (val) => {
-  await updateUserPrefs({ timerSound: val });
+const openAddIngredientDialog = () => {
+  newIngredient.value = { name: '', plural: '', categoryId: '', image: '', isSystem: true };
+  newIngredientImageFile.value = null;
+  showAddIngredientDialog.value = true;
+};
+
+const loadGlobalData = async () => {
+  const [ings, recs] = await Promise.all([getIngredients(), getRecipes()]);
+  allIngredients.value = ings;
+  allRecipes.value = recs;
+  ingredientsWithoutImage.value = ings.filter(i => !i.image || i.image.trim() === '');
+};
+
+const handleSaveNewIngredient = async () => {
+  if (!newIngredient.value.name || !newIngredient.value.categoryId) {
+    $q.notify({ type: 'warning', message: 'Name und Kategorie sind Pflichtfelder!' });
+    return;
+  }
+
+  const uid = auth.currentUser?.uid;
+  const isAdmin = isSpecialAdmin.value;
+
+  // Wenn der Nutzer der Admin ist und der Toggle aktiv ist -> System-Zutat
+  const isSystemIngredient = isAdmin && newIngredient.value.isSystem;
+
+  try {
+    $q.loading.show({ message: 'Zutat wird angelegt...' });
+
+    // 1. Zutatendaten vorbereiten
+    // 'unknown' Fix für TypeScript, analog zu deiner verifyIngredient Logik
+    const ingData = {
+      name: newIngredient.value.name,
+      plural: newIngredient.value.plural,
+      categoryId: newIngredient.value.categoryId,
+      isVerified: isSystemIngredient, // System-Zutaten sind sofort verifiziert
+      createdBy: isSystemIngredient ? 'system' : uid,
+      image: newIngredient.value.image // Falls aus Galerie gewählt
+    } as unknown as IngredientFirebase;
+
+    // 2. In Firebase speichern
+    const newId = await addIngredient(ingData);
+
+    // 3. Falls ein GANZ NEUES Bild per File-Upload gewählt wurde
+    if (newIngredientImageFile.value && !newIngredient.value.image) {
+      const formData = new FormData();
+      formData.append('file', newIngredientImageFile.value);
+      formData.append('upload_preset', 'ml_default');
+
+      // NEU: Ordnernamen bereinigen
+      const category = allCategories.value.find(c => c.id === newIngredient.value.categoryId);
+      const rawFolderName = category ? category.name : 'Unsortiert';
+      const folderName = rawFolderName.replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_').replace(/_+/g, '_');
+
+      const subFolder = isSystemIngredient ? 'System' : 'User';
+      formData.append('folder', `Zutaten/${folderName}/${subFolder}`);
+
+      const cleanName = newIngredient.value.name.trim().replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_').replace(/_+/g, '_');
+      formData.append('public_id', cleanName);
+
+      const resp = await fetch(`https://api.cloudinary.com/v1_1/ddwxwy7j0/image/upload`, {
+        method: 'POST', body: formData
+      });
+
+      // NEU: Upload-Status prüfen
+      if (!resp.ok) {
+        const errorData = await resp.json();
+        console.error("Cloudinary Error:", errorData);
+        throw new Error("Bild-Upload auf den Server fehlgeschlagen.");
+      }
+
+      const data = await resp.json();
+
+      // Zutat mit der echten Cloudinary URL aktualisieren
+      if (data.secure_url) {
+        await updateIngredient(newId, { image: data.secure_url });
+      }
+    }
+
+    $q.notify({ type: 'positive', message: 'Zutat erfolgreich erstellt!' });
+    showAddIngredientDialog.value = false;
+    await loadGlobalData();
+
+  } catch (e) {
+    console.error("Fehler beim Erstellen der Zutat:", e);
+    $q.notify({ type: 'negative', message: 'Fehler beim Erstellen der Zutat.' });
+  } finally {
+    $q.loading.hide();
+  }
+};
+
+const uploadImage = async (file: File | null, ingredientId: string) => {
+  if (!file) return;
+  isUploadingMap.value[ingredientId] = true;
+
+  try {
+    // 1. Kategorie-Namen und Herkunft ermitteln
+    const ingredient = allIngredients.value.find(i => i.id === ingredientId);
+    const category = allCategories.value.find(c => c.id === ingredient?.categoryId);
+
+    // NEU: Ordnernamen bereinigen (entfernt & und Leerzeichen)
+    const rawFolderName = category ? category.name : 'Unsortiert';
+    const folderName = rawFolderName.replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_').replace(/_+/g, '_');
+
+    const isSystemIngredient = ingredient?.createdBy === 'system';
+    const subFolder = isSystemIngredient ? 'System' : 'User';
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('upload_preset', 'ml_default');
+    formData.append('folder', `Zutaten/${folderName}/${subFolder}`);
+
+    // Dateinamen anhand des Zutatennamens setzen
+    if (ingredient?.name) {
+      const cleanName = ingredient.name.trim().replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_').replace(/_+/g, '_');
+      formData.append('public_id', cleanName);
+    }
+
+    const resp = await fetch(`https://api.cloudinary.com/v1_1/ddwxwy7j0/image/upload`, {
+      method: 'POST',
+      body: formData
+    });
+
+    // NEU: Prüfen ob Cloudinary den Upload akzeptiert hat!
+    if (!resp.ok) {
+      const errorData = await resp.json();
+      throw new Error(`Cloudinary Fehler: ${errorData.error?.message || 'Unbekannt'}`);
+    }
+
+    const data = await resp.json();
+
+    // 3. In Firebase speichern (nur wenn wir eine gültige URL haben)
+    if (data.secure_url) {
+      await updateIngredient(ingredientId, { image: data.secure_url });
+      await loadGlobalData();
+      $q.notify({ type: 'positive', message: 'Bild erfolgreich hochgeladen!' });
+    }
+
+  } catch (error: any) {
+    console.error("Upload fehlgeschlagen:", error);
+    $q.notify({ type: 'negative', message: error.message || 'Upload fehlgeschlagen.' });
+  } finally {
+    isUploadingMap.value[ingredientId] = false;
+  }
+};
+
+const showImagePicker = ref(false);
+const imagePickerTargetId = ref<string | null>(null);
+const uniqueExistingImages = computed(() => {
+  const imgs = new Set<string>();
+  allIngredients.value.forEach(i => { if (i.image) imgs.add(i.image); });
+  return Array.from(imgs);
 });
 
-watch([shareMealPlan, shareShoppingList], async () => {
-  await updateUserWGPrefs({
-    shareMealPlan: shareMealPlan.value,
-    shareShoppingList: shareShoppingList.value
+// --- ANPASSUNG FÜR BILDER-GALERIE ---
+const openImagePicker = (id: string) => {
+  imagePickerTargetId.value = id;
+  showImagePicker.value = true;
+};
+
+const selectExistingImage = async (url: string) => {
+  if (imagePickerTargetId.value === 'NEW') {
+    // Bild wird für die neue (noch nicht gespeicherte) Zutat ausgewählt
+    newIngredient.value.image = url;
+    newIngredientImageFile.value = null; // Setzt evtl. hochgeladene Datei zurück
+    showImagePicker.value = false;
+  } else if (imagePickerTargetId.value) {
+    // Normales Speichern für existierende Zutaten
+    await updateIngredient(imagePickerTargetId.value, { image: url });
+    showImagePicker.value = false;
+    await loadGlobalData();
+  }
+};
+
+// --- ZUTATEN LÖSCHEN ---
+const showDeleteDialog = ref(false);
+const isDeleting = ref(false);
+const ingredientToDelete = ref<IngredientFirebase | null>(null);
+const recipesUsingIngredient = ref<RecipeFirebase[]>([]);
+const swapIngredientId = ref<string | null>(null);
+
+const allIngredientsOptions = computed(() =>
+  allIngredients.value.filter(i => i.id !== ingredientToDelete.value?.id)
+    .map(i => ({ label: i.name, value: i.id }))
+);
+
+const getIngredientIdHelper = (ing: { ingredientID?: string; ingredientId?: string }): string =>
+  ing.ingredientID || ing.ingredientId || '';
+
+const initiateDelete = (ing: IngredientFirebase) => {
+  ingredientToDelete.value = ing;
+  recipesUsingIngredient.value = allRecipes.value.filter(r =>
+    r.ingredients?.some(i => getIngredientIdHelper(i) === ing.id)
+  );
+  showDeleteDialog.value = true;
+};
+
+const executeDeleteAndSwap = async () => {
+  if (!ingredientToDelete.value) return;
+  isDeleting.value = true;
+  const oldId = ingredientToDelete.value.id;
+
+  try {
+    for (const recipe of recipesUsingIngredient.value) {
+      if (recipe.id) {
+        const updated = JSON.parse(JSON.stringify(recipe)) as RecipeFirebase;
+        updated.ingredients?.forEach((i: { ingredientID?: string; ingredientId?: string }) => {
+          if (getIngredientIdHelper(i) === oldId) {
+            i.ingredientID = swapIngredientId.value!;
+          }
+        });
+        await updateRecipe(recipe.id, updated);
+      }
+    }
+    await deleteDoc(doc(db, 'ingredients', oldId));
+    showDeleteDialog.value = false;
+    await loadGlobalData();
+  } catch (error: unknown) {
+    console.error("Delete error:", error);
+  } finally {
+    isDeleting.value = false;
+  }
+};
+
+// ==========================================
+// --- SUPERMÄRKTE ---
+// ==========================================
+const supermarkets = ref<WithId<Markets>[]>([]);
+const allCategories = ref<{ id: string, name: string }[]>([]);
+const showMarketDialog = ref(false);
+const isEditMode = ref(false);
+const editingMarket = ref<Markets>({ name: '', categoryOrder: [] });
+const editingId = ref<string | null>(null);
+
+const loadSupermarketsAndCategories = async () => {
+  const catSnap = await getDocs(collection(db, 'categories'));
+  allCategories.value = catSnap.docs.map(d => ({ id: d.id, name: d.data().name }));
+  supermarkets.value = await getMarkets();
+};
+
+const availableCategoriesForEdit = computed(() =>
+  allCategories.value.filter(c => !editingMarket.value.categoryOrder.includes(c.id))
+);
+
+const selectedCategoriesObjects = computed(() =>
+  editingMarket.value.categoryOrder
+    .map(id => allCategories.value.find(c => c.id === id))
+    .filter((c): c is { id: string, name: string } => !!c)
+);
+
+const openAddMarket = () => {
+  isEditMode.value = false; editingMarket.value = { name: '', categoryOrder: [] }; showMarketDialog.value = true;
+};
+const openEditMarket = (m: WithId<Markets>) => {
+  isEditMode.value = true; editingId.value = m.id; editingMarket.value = { ...m }; showMarketDialog.value = true;
+};
+const saveMarket = async () => {
+  if (isEditMode.value && editingId.value) await updateMarket(editingId.value, editingMarket.value);
+  else await addMarket(editingMarket.value);
+  await loadSupermarketsAndCategories(); showMarketDialog.value = false;
+};
+const confirmDeleteMarket = (m: WithId<Markets>) => {
+  $q.dialog({ title: 'Markt löschen?', cancel: true }).onOk(() => {
+    void (async () => { await deleteMarket(m.id); await loadSupermarketsAndCategories(); })();
   });
+};
+
+// Filter für nicht verifizierte Zutaten (Ohne 'any'!)
+const unverifiedIngredients = computed<IngredientFirebase[]>(() => {
+  return (allIngredients.value as IngredientFirebase[]).filter(i =>
+    i.isVerified === false || (!i.image && i.createdBy === auth.currentUser?.uid)
+  );
 });
 
-watch(unitPreference, async (newVal) => {
-  await updateUserPrefs({ unitPreference: newVal });
+const ingredientFilterCategory = ref<string | null>(null);
+const ingredientFilterSource = ref<'all' | 'user' | 'system'>('all');
+const ingredientSearchQuery = ref('');
+const ingredientImageFilter = ref<'maintenance' | 'all' | 'withImage' | 'withoutImage'>('maintenance');
+
+// Zählt die Zutaten für das Badge im Tab anhand der Berechtigungen
+const pendingIngredientsCount = computed(() => {
+  const uid = auth.currentUser?.uid;
+
+  return allIngredients.value.filter(i => {
+    // 1. Braucht die Zutat überhaupt Wartung?
+    const needsMaintenance = i.isVerified === false || !i.image || i.image.trim() === '';
+    if (!needsMaintenance) return false;
+
+    // 2. Berechtigungs-Check
+    if (isSpecialAdmin.value) {
+      // Der Admin sieht seine eigenen UND die System-Zutaten
+      return i.createdBy === 'system' || i.createdBy === uid;
+    } else {
+      // Normale User sehen NUR ihre selbst erstellten Zutaten
+      return i.createdBy === uid;
+    }
+  }).length;
 });
 
+const maintenanceIngredients = computed<IngredientFirebase[]>(() => {
+  let filtered = allIngredients.value as IngredientFirebase[];
+
+  // 1. Textsuche (Nur Admin - überschreibt alles)
+  const query = ingredientSearchQuery.value?.toLowerCase().trim();
+  if (isSpecialAdmin.value && query) {
+    filtered = filtered.filter(i =>
+      i.name.toLowerCase().includes(query) ||
+      (i.plural && i.plural.toLowerCase().includes(query))
+    );
+  } else {
+    // 2. Filter nach Status / Bild
+    if (ingredientImageFilter.value === 'maintenance') {
+      // Zeigt nur Zutaten, die noch unbestätigt sind oder kein Bild haben
+      filtered = filtered.filter(i => i.isVerified === false || !i.image || i.image.trim() === '');
+    } else if (ingredientImageFilter.value === 'withImage') {
+      // Zeigt ALLE Zutaten mit Bild (ignoriert isVerified)
+      filtered = filtered.filter(i => i.image && i.image.trim() !== '');
+    } else if (ingredientImageFilter.value === 'withoutImage') {
+      // Zeigt ALLE Zutaten ohne Bild
+      filtered = filtered.filter(i => !i.image || i.image.trim() === '');
+    }
+    // Wenn 'all' gewählt ist, wird hier gar nicht gefiltert -> alle Zutaten werden angezeigt
+  }
+
+  // 3. Filter nach Kategorie
+  if (ingredientFilterCategory.value) {
+    filtered = filtered.filter(i => i.categoryId === ingredientFilterCategory.value);
+  }
+
+  // 4. Filter nach Quelle (Admin / User)
+  if (isSpecialAdmin.value) {
+    if (ingredientFilterSource.value === 'user') {
+      filtered = filtered.filter(i => i.createdBy !== 'system');
+    } else if (ingredientFilterSource.value === 'system') {
+      filtered = filtered.filter(i => i.createdBy === 'system');
+    }
+  } else {
+    // Normale User sehen in der Wartung nur ihre eigenen
+    filtered = filtered.filter(i => i.createdBy !== 'system');
+  }
+
+  return filtered;
+});
+
+// Initialisiere die Edit-Werte, wenn die Liste geladen wird
+watch(maintenanceIngredients, (newIngs) => {
+  newIngs.forEach(ing => {
+    if (!ingredientEdits.value[ing.id]) {
+      ingredientEdits.value[ing.id] = {
+        plural: ing.plural || '',
+        categoryId: ing.categoryId || ''
+      };
+    }
+  });
+}, { immediate: true });
+
+// Funktion zum Verifizieren & Speichern der Korrekturen (Ohne 'any'!)
+const verifyIngredient = async (id: string) => {
+  const edits = ingredientEdits.value[id];
+
+  // Wir nutzen 'unknown' als Zwischenschritt, was ESLint im Gegensatz zu 'any' erlaubt
+  const updatePayload = {
+    isVerified: true,
+    plural: edits?.plural || '',
+    categoryId: edits?.categoryId || ''
+  } as unknown as Partial<IngredientFirebase>;
+
+  await updateIngredient(id, updatePayload);
+
+  await loadGlobalData();
+  $q.notify({ type: 'positive', message: 'Zutat mit Details bestätigt!', icon: 'verified' });
+};
+
+const addCategoryToMarket = (id: string) => editingMarket.value.categoryOrder.push(id);
+const removeCategoryFromMarket = (id: string) => editingMarket.value.categoryOrder = editingMarket.value.categoryOrder.filter(x => x !== id);
+
+const moveCategory = (idx: number, dir: number) => {
+  const arr = [...editingMarket.value.categoryOrder];
+  const target = idx + dir;
+
+  if (target >= 0 && target < arr.length && idx >= 0 && idx < arr.length) {
+    const itemA = arr[idx];
+    const itemB = arr[target];
+
+    if (itemA !== undefined && itemB !== undefined) {
+      arr[idx] = itemB;
+      arr[target] = itemA;
+      editingMarket.value.categoryOrder = arr;
+    }
+  }
+};
+
+// --- INITIALISIERUNG ---
 onMounted(async () => {
-  const storedTheme = localStorage.getItem('darkMode');
-  if (storedTheme !== null) isDarkMode.value = storedTheme === 'true';
-  const storedPortions = localStorage.getItem('defaultPortions');
-  if (storedPortions) defaultPortions.value = parseInt(storedPortions, 10);
-
   void loadGlobalData();
   void loadSupermarketsAndCategories();
   await loadWgData();
@@ -427,129 +749,266 @@ onMounted(async () => {
 </script>
 
 <template>
-  <q-page class="bg-dark-page text-white q-pa-md q-pa-lg-xl">
+  <q-page class="bg-dynamic-page dynamic-text q-pa-md q-pa-lg-xl transition-ease">
     <div class="max-width-container">
 
-      <h1 class="text-h3 text-weight-bold q-my-none q-mb-lg">Einstellungen</h1>
+      <div class="row items-center q-mb-xl dynamic-card dynamic-border q-pa-lg rounded-xl shadow-2">
+        <q-avatar size="90px" color="primary" text-color="white" class="shadow-10 profile-avatar">
+          {{ (displayName || 'D').charAt(0).toUpperCase() }}
+        </q-avatar>
+        <div class="q-ml-lg">
+          <div class="text-h4 text-weight-bold dynamic-text tracking-tight">{{ displayName || 'Dein Profil' }}</div>
+          <div class="dynamic-text-muted text-subtitle1">{{ auth.currentUser?.email }}</div>
+        </div>
+        <q-space />
+        <q-btn flat round icon="logout" color="grey-6" @click="handleLogout" class="hover-negative-btn">
+          <q-tooltip class="bg-negative">Abmelden</q-tooltip>
+        </q-btn>
+      </div>
 
-      <q-tabs v-model="tab" class="bg-dark border-dark rounded-borders q-mb-xl text-grey-5" active-color="primary"
-        indicator-color="primary" align="left" narrow-indicator>
-        <q-tab name="general" icon="tune" label="Allgemein" no-caps class="text-weight-bold" />
-        <q-tab name="supermarkets" icon="storefront" label="Supermärkte" no-caps class="text-weight-bold" />
-        <q-tab name="ingredients" icon="hide_image" label="Zutaten-Bilder" no-caps class="text-weight-bold">
-          <q-badge v-if="ingredientsWithoutImage.length > 0" color="negative" floating rounded class="q-ml-sm">
-            {{ ingredientsWithoutImage.length }}
-          </q-badge>
-        </q-tab>
-        <q-tab name="about" icon="info_outline" label="Info" no-caps class="text-weight-bold" />
-        <q-tab name="wg" icon="groups" label="Meine WG" no-caps class="text-weight-bold" />
-      </q-tabs>
+      <div class="tabs-container q-mb-xl">
+        <q-tabs v-model="tab" class="settings-tabs shadow-2 dynamic-card dynamic-border rounded-xl"
+          active-color="primary" indicator-color="primary" expand no-caps narrow-indicator inline-label outside-arrows
+          mobile-arrows>
+          <q-tab name="general" label="Präferenzen" icon="tune" />
+          <q-tab name="account" label="Sicherheit" icon="lock" />
+          <q-tab name="wg" label="Meine WG" icon="groups" />
+          <q-tab name="supermarkets" label="Märkte" icon="storefront" />
+          <q-tab name="ingredients" label="Zutaten" icon="storage">
+            <q-badge v-if="pendingIngredientsCount > 0" color="negative" floating rounded>
+              {{ pendingIngredientsCount }}
+            </q-badge>
+          </q-tab>
+        </q-tabs>
+      </div>
 
-      <q-tab-panels v-model="tab" animated class="bg-transparent p-0">
+      <q-tab-panels v-model="tab" animated class="bg-transparent overflow-visible full-width">
 
         <q-tab-panel name="general" class="q-pa-none">
-          <q-card flat class="settings-card bg-dark border-dark">
-            <q-list separator class="separator-dark">
-              <q-item tag="label" v-ripple class="q-py-lg">
-                <q-item-section avatar>
-                  <q-icon name="dark_mode" color="grey-5" size="md" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">Dunkles Design</q-item-label>
-                  <q-item-label caption class="text-grey-5">Aktiviert den Dark Mode der App</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-toggle v-model="isDarkMode" color="primary" size="lg" />
-                </q-item-section>
-              </q-item>
-
-              <q-item class="q-py-lg">
-                <q-item-section avatar>
-                  <q-icon name="restaurant" color="grey-5" size="md" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">Standard-Portionen</q-item-label>
-                  <q-item-label caption class="text-grey-5">Vorauswahl beim Anlegen neuer Rezepte</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <div class="row items-center no-wrap bg-dark-soft border-dark rounded-borders q-pa-xs">
-                    <q-btn flat dense round icon="remove" color="white"
-                      @click="defaultPortions > 1 ? defaultPortions-- : null" />
-                    <div class="text-weight-bold q-px-md text-subtitle1">{{ defaultPortions }}</div>
-                    <q-btn flat dense round icon="add" color="white" @click="defaultPortions++" />
-                  </div>
-                </q-item-section>
-              </q-item>
-
-              <q-item class="q-py-lg">
-                <q-item-section avatar>
-                  <q-icon name="person" color="grey-5" size="md" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">Anzeigename</q-item-label>
-                  <q-item-label caption class="text-grey-5">Wie du in der WG erscheinst</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-input v-model="displayName" dense filled dark class="custom-dark-input" placeholder="Dein Name"
-                    @blur="updateProfileName" @keyup.enter="updateProfileName" style="width: 150px;" />
-                </q-item-section>
-              </q-item>
-
-              <q-item class="q-py-lg">
-                <q-item-section avatar>
-                  <q-icon name="straighten" color="grey-5" size="md" />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">Maßeinheiten</q-item-label>
-                  <q-item-label caption class="text-grey-5">Bevorzugtes System beim KI-Import</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-select v-model="unitPreference" :options="[
-                    { label: 'Metrisch (g, ml, °C)', value: 'metric' },
-                    { label: 'Original (Cups, °F)', value: 'original' }
-                  ]" dense filled dark emit-value map-options class="custom-dark-input" style="width: 180px;" />
-                </q-item-section>
-              </q-item>
-
-              
-            </q-list>
-
-            <q-separator class="separator-dark" />
-            <div class="q-pa-md">
-              <q-btn color="negative" icon="logout" label="Abmelden" class="full-width text-weight-bold" unelevated
-                no-caps style="border-radius: 8px;" @click="handleLogout" />
+          <div class="row q-col-gutter-lg">
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md row items-center text-primary">
+                  <q-icon name="person_outline" class="q-mr-sm" size="sm" /> Profil & Identität
+                </div>
+                <q-input v-model="displayName" label="Anzeigename" filled :dark="isDarkMode" color="primary"
+                  @blur="updateProfileName" class="custom-dynamic-input full-width" />
+                <p class="text-caption dynamic-text-muted q-mt-sm">Wird in der WG für den Wochenplan genutzt.</p>
+              </q-card>
             </div>
-          </q-card>
+
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md row items-center text-primary">
+                  <q-icon name="palette" class="q-mr-sm" size="sm" /> App-Design & Farben
+                </div>
+                <q-item tag="label" dense class="q-px-none q-mb-md">
+                  <q-item-section class="dynamic-text">Dunkles Design</q-item-section>
+                  <q-item-section side><q-toggle v-model="isDarkMode" color="primary" /></q-item-section>
+                </q-item>
+                <div class="text-caption dynamic-text-muted q-mb-sm">Akzentfarbe wählen:</div>
+                <div class="row q-gutter-md items-center">
+                  <q-btn v-for="color in presetColors" :key="color" round size="14px"
+                    :style="{ backgroundColor: color }" @click="primaryColor = color" class="color-picker-btn shadow-2">
+                    <q-icon v-if="primaryColor.toLowerCase() === color.toLowerCase()" name="check" size="xs"
+                      color="white" />
+                  </q-btn>
+                  <q-btn round size="14px" class="color-picker-btn shadow-2 relative-position"
+                    style="background: conic-gradient(from 0deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);">
+                    <q-icon v-if="isCustomColor" name="check" size="xs" color="white"
+                      style="z-index: 1; text-shadow: 0 0 3px rgba(0,0,0,0.8);" />
+                    <q-popup-proxy transition-show="scale" transition-hide="scale">
+                      <q-card class="dynamic-card q-pa-sm border-dark">
+                        <q-color v-model="primaryColor" no-header no-footer format-model="hex" class="bg-transparent" />
+                      </q-card>
+                    </q-popup-proxy>
+                  </q-btn>
+                </div>
+              </q-card>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md row items-center text-primary">
+                  <q-icon name="restaurant" class="q-mr-sm" size="sm" /> Kochen & Rezepte
+                </div>
+                <q-input v-model.number="defaultPortions" type="number" label="Standard-Portionen" filled
+                  :dark="isDarkMode" color="primary" class="custom-dynamic-input q-mb-md" min="1"
+                  hint="Vorauswahl für neue Rezepte" />
+                <q-select v-model="timerSound" label="Timer-Ton" filled :dark="isDarkMode" color="primary"
+                  :options="[{ label: 'Klassisch (Glocke)', value: 'classic' }, { label: 'Digital', value: 'digital' }, { label: 'Sanft', value: 'soft' }]"
+                  emit-value map-options class="custom-dynamic-input q-mb-md" />
+                <q-item tag="label" class="bg-dynamic-soft rounded-borders q-pa-sm transition-ease dynamic-border">
+                  <q-item-section>
+                    <q-item-label class="text-weight-bold dynamic-text">Display immer an</q-item-label>
+                  </q-item-section>
+                  <q-item-section side><q-toggle v-model="keepScreenOn" color="primary" /></q-item-section>
+                </q-item>
+              </q-card>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md row items-center text-primary">
+                  <q-icon name="calendar_month" class="q-mr-sm" size="sm" /> Wochenplan & Einkaufen
+                </div>
+                <q-select v-model="weekStart" label="Wochenstart" filled :dark="isDarkMode" color="primary"
+                  :options="[{ label: 'Montag', value: 1 }, { label: 'Sonntag', value: 0 }]" emit-value map-options
+                  class="custom-dynamic-input q-mb-lg" />
+                <q-item tag="label" class="q-px-none q-mb-sm">
+                  <q-item-section>
+                    <q-item-label class="dynamic-text text-weight-bold">Vergangene Tage ausblenden</q-item-label>
+                  </q-item-section>
+                  <q-item-section side><q-toggle v-model="hidePastDays" color="primary" /></q-item-section>
+                </q-item>
+                <q-separator :dark="isDarkMode" inset class="opacity-20 q-my-sm" />
+                <q-item tag="label" class="q-px-none">
+                  <q-item-section>
+                    <q-item-label class="dynamic-text text-weight-bold">Liste automatisch aufräumen</q-item-label>
+                  </q-item-section>
+                  <q-item-section side><q-toggle v-model="autoCleanupList" color="primary" /></q-item-section>
+                </q-item>
+              </q-card>
+            </div>
+
+            <div class="col-12">
+              <q-expansion-item label="Daten-Management & Sicherheit" icon="security"
+                header-class="text-weight-bold dynamic-text-muted rounded-borders dynamic-border"
+                class="dynamic-card rounded-borders overflow-hidden shadow-1">
+                <div class="q-pa-lg q-gutter-y-md bg-dynamic-soft">
+                  <div class="row q-col-gutter-md">
+                    <div class="col-12 col-sm-6">
+                      <q-btn color="primary" icon="cloud_download" label="Backup exportieren (.json)"
+                        class="full-width q-py-sm rounded-borders" @click="handleExport" no-caps unelevated />
+                    </div>
+                    <div class="col-12 col-sm-6">
+                      <q-btn outline color="negative" icon="delete_forever" label="Account & Daten löschen"
+                        class="full-width q-py-sm rounded-borders" @click="confirmAccountDeletion" no-caps />
+                    </div>
+                  </div>
+                </div>
+              </q-expansion-item>
+            </div>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="account" class="q-pa-none">
+          <div class="row q-col-gutter-lg">
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md text-primary">E-Mail Adresse</div>
+                <q-input v-model="newEmail" label="E-Mail ändern" filled :dark="isDarkMode" color="primary"
+                  class="q-mb-lg custom-dynamic-input" hint="Änderung erfordert einen frischen Login" />
+                <q-btn label="Speichern" color="primary" @click="handleUpdateEmail" no-caps
+                  class="full-width rounded-borders shadow-2" unelevated />
+              </q-card>
+            </div>
+            <div class="col-12 col-md-6">
+              <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-lg full-height card-hover">
+                <div class="text-subtitle1 text-weight-bold q-mb-md text-primary">Passwort ändern</div>
+                <q-input v-model="newPassword" type="password" label="Neues Passwort" filled :dark="isDarkMode"
+                  color="primary" class="q-mb-sm custom-dynamic-input" />
+                <q-input v-model="confirmPassword" type="password" label="Passwort bestätigen" filled :dark="isDarkMode"
+                  color="primary" class="q-mb-lg custom-dynamic-input" />
+                <q-btn label="Passwort speichern" color="primary" @click="handleUpdatePassword" no-caps
+                  class="full-width rounded-borders shadow-2" unelevated />
+              </q-card>
+            </div>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="wg" class="q-pa-none">
+          <div v-if="wgInfo" class="column items-center">
+            <q-card flat class="dynamic-card dynamic-border rounded-xl q-pa-xl text-center full-width shadow-10">
+              <div class="text-h6 dynamic-text-muted q-mb-xs">WG-Gruppe</div>
+              <div class="text-h3 text-weight-bolder dynamic-text q-mb-md">{{ wgInfo.name }}</div>
+
+              <div class="wg-code-container q-mt-lg">
+                <div class="text-caption text-primary text-uppercase text-weight-bold q-mb-xs">Einladungs-Code</div>
+                <div class="wg-code-box cursor-pointer row no-wrap items-center justify-center q-pa-md"
+                  @click="copyCode(wgInfo.code)">
+                  <span class="text-h3 text-primary text-weight-bolder letter-spacing-2">{{ wgInfo.code }}</span>
+                  <q-icon name="content_copy" size="sm" color="primary" class="q-ml-md" />
+                </div>
+              </div>
+
+              <q-separator :dark="isDarkMode" class="q-my-xl opacity-20" />
+
+              <div class="text-left max-width-600 center-block">
+                <div class="text-subtitle2 dynamic-text-muted q-mb-md row items-center">
+                  <q-icon name="group" class="q-mr-sm" /> Mitglieder ({{ wgMembers.length }})
+                </div>
+                <q-list class="q-gutter-y-sm">
+                  <q-item v-for="member in wgMembers" :key="member.id"
+                    class="bg-dynamic-soft rounded-borders dynamic-border q-pa-md">
+                    <q-item-section avatar>
+                      <q-avatar color="primary" text-color="white" size="44px" class="text-weight-bold shadow-1">
+                        {{ member.name.charAt(0).toUpperCase() }}
+                      </q-avatar>
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label class="text-weight-bold dynamic-text">{{ member.name }}</q-item-label>
+                      <q-item-label caption class="dynamic-text-muted">{{ member.email }}</q-item-label>
+                    </q-item-section>
+                  </q-item>
+                </q-list>
+              </div>
+
+              <q-btn outline color="negative" label="Gruppe verlassen" @click="handleLeaveWG"
+                class="q-mt-xl q-px-xl rounded-borders" no-caps />
+            </q-card>
+          </div>
+
+          <div v-else class="row q-col-gutter-xl">
+            <div class="col-12 col-md-6">
+              <q-card flat
+                class="dynamic-card dynamic-border rounded-xl q-pa-xl text-center full-height flex flex-center">
+                <div class="full-width">
+                  <q-icon name="group_add" size="4rem" color="primary" class="q-mb-md opacity-40" />
+                  <div class="text-h5 text-weight-bold q-mb-md dynamic-text">Neue WG gründen</div>
+                  <q-input v-model="createWgName" label="Name der Gruppe" filled :dark="isDarkMode" color="primary"
+                    class="custom-dynamic-input q-mb-lg" />
+                  <q-btn @click="handleCreateWG" label="WG erstellen"
+                    class="full-width q-py-md text-weight-bold shadow-2" color="primary" unelevated no-caps />
+                </div>
+              </q-card>
+            </div>
+            <div class="col-12 col-md-6">
+              <q-card flat
+                class="dynamic-card dynamic-border rounded-xl q-pa-xl text-center full-height flex flex-center">
+                <div class="full-width">
+                  <q-icon name="input" size="4rem" color="primary" class="q-mb-md opacity-40" />
+                  <div class="text-h5 text-weight-bold q-mb-md dynamic-text">WG beitreten</div>
+                  <q-input v-model="joinWgCode" label="6-stelliger Code" filled :dark="isDarkMode" color="primary"
+                    class="custom-dynamic-input q-mb-lg" input-class="text-center text-h5 letter-spacing-1" />
+                  <q-btn @click="handleJoinWG" label="Code absenden" class="full-width q-py-md text-weight-bold" outline
+                    color="primary" no-caps />
+                </div>
+              </q-card>
+            </div>
+          </div>
         </q-tab-panel>
 
         <q-tab-panel name="supermarkets" class="q-pa-none">
-          <div class="row items-center justify-between q-mb-md">
-            <div class="text-h6 text-weight-bold">Meine Supermärkte</div>
-            <q-btn color="primary" icon="add" label="Neuer Markt" no-caps unelevated
-              class="rounded-borders text-weight-bold" @click="openAddMarket" />
+          <div class="row items-center justify-between q-mb-lg">
+            <h2 class="text-h5 text-weight-bold q-my-none dynamic-text">Märkte</h2>
+            <q-btn color="primary" icon="add" label="Neu" @click="openAddMarket" no-caps unelevated
+              class="rounded-borders shadow-2" />
           </div>
-
-          <q-card flat class="settings-card bg-dark border-dark">
-            <q-list separator class="separator-dark">
-              <div v-if="supermarkets.length === 0" class="text-center text-grey-5 q-pa-xl">
-                <q-icon name="store_mall_directory" size="3em" class="q-mb-sm" />
-                <div>Noch keine Supermärkte angelegt.</div>
-              </div>
-
-              <q-item v-for="market in supermarkets" :key="market.id" class="q-py-md">
-                <q-item-section avatar>
-                  <q-avatar color="primary" text-color="dark" icon="storefront" class="text-weight-bold" />
-                </q-item-section>
+          <q-card flat class="dynamic-card dynamic-border rounded-xl overflow-hidden shadow-2">
+            <q-list separator>
+              <q-item v-for="m in supermarkets" :key="m.id" class="q-py-lg q-px-lg list-item-hover">
+                <q-item-section avatar><q-icon name="storefront" color="primary" size="md" /></q-item-section>
                 <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">{{ market.name }}</q-item-label>
-                  <q-item-label caption class="text-grey-5">{{ market.categoryOrder?.length || 0 }} sortierte
+                  <q-item-label class="text-h6 text-weight-bold dynamic-text">{{ m.name }}</q-item-label>
+                  <q-item-label caption class="dynamic-text-muted">{{ m.categoryOrder?.length || 0 }}
                     Kategorien</q-item-label>
                 </q-item-section>
                 <q-item-section side>
-                  <div class="row q-gutter-sm">
-                    <q-btn flat round icon="edit" color="grey-4" class="bg-dark-soft" @click="openEditMarket(market)" />
-                    <q-btn flat round icon="delete_outline" color="red-4" class="bg-dark-soft"
-                      @click="confirmDeleteMarket(market)" />
+                  <div class="row q-gutter-md">
+                    <q-btn flat round icon="edit" color="grey-5" @click="openEditMarket(m)" class="bg-dynamic-soft" />
+                    <q-btn flat round icon="delete_outline" color="red-4" @click="confirmDeleteMarket(m)"
+                      class="bg-dynamic-soft" />
                   </div>
                 </q-item-section>
               </q-item>
@@ -559,296 +1018,297 @@ onMounted(async () => {
 
         <q-tab-panel name="ingredients" class="q-pa-none">
           <div class="row items-center justify-between q-mb-md">
-            <div class="text-h6 text-weight-bold">Zutaten ohne Bilder</div>
-            <div class="text-caption text-grey-5">{{ ingredientsWithoutImage.length }} Einträge</div>
+            <div class="row items-center q-gutter-sm">
+              <h2 class="text-h5 text-weight-bold q-my-none dynamic-text">Zutaten-Wartung</h2>
+
+              <q-chip v-if="isSpecialAdmin" color="amber-8" text-color="white" icon="warning" size="sm"
+                class="text-weight-bold shadow-1">
+                {{ unverifiedIngredients.length }} eigene
+              </q-chip>
+              <q-chip color="grey-7" text-color="white" icon="hide_image" size="sm" class="text-weight-bold shadow-1">
+                {{ ingredientsWithoutImage.length }} ohne Bild
+              </q-chip>
+            </div>
+
+            <div class="row q-gutter-sm items-center">
+              <q-btn v-if="isSpecialAdmin" outline color="secondary" icon="upload_file" label="Seed" unelevated no-caps
+                size="sm" class="relative-position rounded-borders">
+                <input type="file" accept=".json" @change="seedDatabaseWithJson"
+                  style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;" />
+              </q-btn>
+              <q-btn color="primary" icon="add" label="Neue Zutat" @click="openAddIngredientDialog" unelevated no-caps
+                class="rounded-borders shadow-2" />
+            </div>
           </div>
 
-          <q-card flat class="settings-card bg-dark border-dark">
-            <div v-if="ingredientsWithoutImage.length === 0" class="text-center q-pa-xl">
-              <q-icon name="check_circle_outline" size="4em" color="positive" class="q-mb-md" />
-              <div class="text-h5 text-weight-bold text-white">Alles aufgeräumt!</div>
-              <div class="text-grey-5 q-mt-sm">Jede Zutat in deiner Datenbank hat ein Bild.</div>
-            </div>
+          <q-card flat class="dynamic-card dynamic-border rounded-xl q-mb-xl bg-dynamic-soft shadow-1">
+            <q-card-section class="q-pa-md q-gutter-y-md">
 
-            <q-list separator class="separator-dark" v-else>
-              <q-item v-for="ing in ingredientsWithoutImage" :key="ing.id" class="q-py-md row items-center">
-
-                <q-item-section avatar>
-                  <q-avatar color="grey-9" text-color="grey-5" icon="image_not_supported" />
-                </q-item-section>
-
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-body1">{{ ing.name }}</q-item-label>
-                  <q-item-label caption class="text-grey-6 text-xs">ID: {{ ing.id }}</q-item-label>
-                </q-item-section>
-
-                <q-item-section side class="gt-xs">
-                  <div class="row items-center q-gutter-sm">
-
-                    <q-btn outline color="primary" icon="photo_library" label="Aus Datenbank" no-caps
-                      @click="openImagePicker(ing.id)">
-                      <q-tooltip class="bg-primary">Ein bereits hochgeladenes Bild verwenden</q-tooltip>
-                    </q-btn>
-
-                    <q-btn outline color="primary" icon="cloud_upload" label="Upload" no-caps
-                      :loading="isUploadingMap[ing.id]">
-                      <q-file
-                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;"
-                        accept="image/*" :model-value="null"
-                        @update:model-value="(file) => uploadImage(file, ing.id)" />
-                    </q-btn>
-
-                    <q-btn flat round icon="delete" color="red-4" class="bg-dark-soft" @click="initiateDelete(ing)">
-                      <q-tooltip class="bg-negative">Zutat löschen (und aus Rezepten entfernen)</q-tooltip>
-                    </q-btn>
-
-                  </div>
-                </q-item-section>
-
-                <q-item-section side class="lt-sm">
-                  <div class="row items-center q-gutter-xs">
-                    <q-btn flat round dense icon="photo_library" color="primary" class="bg-dark-soft"
-                      @click="openImagePicker(ing.id)" />
-                    <q-btn flat round dense icon="cloud_upload" color="primary" class="bg-dark-soft relative-position"
-                      :loading="isUploadingMap[ing.id]">
-                      <q-file
-                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;"
-                        accept="image/*" :model-value="null"
-                        @update:model-value="(file) => uploadImage(file, ing.id)" />
-                    </q-btn>
-                    <q-btn flat round dense icon="delete" color="red-4" class="bg-dark-soft"
-                      @click="initiateDelete(ing)" />
-                  </div>
-                </q-item-section>
-              </q-item>
-            </q-list>
-          </q-card>
-        </q-tab-panel>
-
-        <q-tab-panel name="wg" class="q-pa-none">
-          <div class="text-h6 q-mb-md text-weight-bold">Familie & WG</div>
-
-          <q-card flat class="settings-card bg-dark border-dark q-pa-lg">
-
-            <div v-if="wgInfo" class="text-center">
-              <q-avatar size="80px" color="primary" text-color="white" class="q-mb-md shadow-4">
-                <q-icon name="diversity_3" size="xl" />
-              </q-avatar>
-              <h2 class="text-h4 text-weight-bold q-my-none">{{ wgInfo.name }}</h2>
-              <p class="text-grey-5 q-mt-sm">Du teilst Rezepte, Wochenpläne und Einkaufslisten mit dieser Gruppe.</p>
-
-              <div class="bg-dark-soft border-dark rounded-borders q-pa-md q-my-lg inline-block">
-                <div class="text-caption text-grey-5 text-uppercase letter-spacing-1 q-mb-xs">Einladungs-Code</div>
-                <div class="text-h4 text-weight-bolder text-primary letter-spacing-1">{{ wgInfo.code }}</div>
+              <div v-if="isSpecialAdmin" class="row">
+                <q-input v-model="ingredientSearchQuery" filled :dark="isDarkMode" color="primary"
+                  class="custom-dynamic-input full-width" placeholder="Zutaten durchsuchen (hebt alle Filter auf)..."
+                  clearable dense>
+                  <template v-slot:prepend><q-icon name="search" /></template>
+                </q-input>
               </div>
 
-              <div class="row justify-center q-mt-md">
-                <q-btn outline color="negative" icon="logout" label="WG verlassen" @click="handleLeaveWG"
-                  :loading="isWgProcessing" no-caps class="text-weight-bold" />
-              </div>
-            </div>
+              <div class="row q-col-gutter-md items-end">
 
-            <div v-else>
-              <div class="text-center q-mb-xl">
-                <q-icon name="group_add" size="4em" color="grey-6" class="q-mb-md" />
-                <div class="text-h6 text-weight-bold">Du bist in keiner WG</div>
-                <p class="text-grey-5">Erstelle eine neue Gruppe oder trete einer bestehenden bei, um den Wochenplan und
-                  Rezepte zu teilen.</p>
-              </div>
-
-              <div class="row q-col-gutter-lg">
-                <div class="col-12 col-md-6">
-                  <div class="bg-dark-soft border-dark rounded-borders q-pa-md full-height">
-                    <div class="text-subtitle1 text-weight-bold q-mb-sm text-primary">WG gründen</div>
-                    <q-input v-model="createWgName" label="Name (z.B. Chaos-WG)" filled dark
-                      class="custom-dark-input q-mb-md" hide-bottom-space />
-                    <q-btn color="primary" label="Neue WG erstellen" @click="handleCreateWG" :loading="isWgProcessing"
-                      class="full-width text-weight-bold" unelevated no-caps />
-                  </div>
+                <div class="col-12 col-md-5">
+                  <div class="text-caption text-weight-bold dynamic-text-muted q-mb-xs text-uppercase tracking-widest"
+                    style="font-size: 10px; opacity: 0.7;">Ansicht</div>
+                  <q-btn-toggle v-model="ingredientImageFilter" spread no-caps unelevated toggle-color="primary"
+                    color="transparent" text-color="grey-7" :dark="isDarkMode"
+                    class="dynamic-border rounded-borders full-width" size="13px" :options="[
+                      { label: 'Wartung', value: 'maintenance', icon: 'build' },
+                      { label: 'Alle', value: 'all', icon: 'list' },
+                      { label: 'Mit Bild', value: 'withImage', icon: 'image' },
+                      { label: 'Ohne Bild', value: 'withoutImage', icon: 'hide_image' }
+                    ]" />
                 </div>
 
-                <div class="col-12 col-md-6">
-                  <div class="bg-dark-soft border-dark rounded-borders q-pa-md full-height">
-                    <div class="text-subtitle1 text-weight-bold q-mb-sm text-primary">WG beitreten</div>
-                    <q-input v-model="joinWgCode" label="6-stelliger Code" filled dark class="custom-dark-input q-mb-md"
-                      hide-bottom-space />
-                    <q-btn outline color="primary" label="Beitreten" @click="handleJoinWG" :loading="isWgProcessing"
-                      class="full-width text-weight-bold" no-caps />
-                  </div>
+                <div class="col-12 col-sm-6 col-md-3">
+                  <q-select v-model="ingredientFilterCategory" :options="allCategories" option-value="id"
+                    option-label="name" label="Kategorie filtern" filled clearable emit-value map-options
+                    :dark="isDarkMode" color="primary" class="custom-dynamic-input" dense hide-bottom-space>
+                    <template v-slot:prepend><q-icon name="filter_list" size="xs" /></template>
+                  </q-select>
                 </div>
-              </div>
-            </div>
 
+                <div v-if="isSpecialAdmin" class="col-12 col-sm-6 col-md-4">
+                  <div class="text-caption text-weight-bold dynamic-text-muted q-mb-xs text-uppercase tracking-widest"
+                    style="font-size: 10px; opacity: 0.7;">Datenquelle</div>
+                  <q-btn-toggle v-model="ingredientFilterSource" spread no-caps unelevated toggle-color="primary"
+                    color="transparent" text-color="grey-7" :dark="isDarkMode"
+                    class="dynamic-border rounded-borders full-width" size="13px" :options="[
+                      { label: 'Alle', value: 'all' },
+                      { label: 'Nur User', value: 'user' },
+                      { label: 'Nur System', value: 'system' }
+                    ]" />
+                </div>
+
+              </div>
+            </q-card-section>
           </q-card>
 
-          <q-separator dark class="q-my-lg" />
-          <div class="text-subtitle1 text-weight-bold q-mb-md text-primary">WG-Berechtigungen</div>
-          <div class="bg-dark-soft border-dark rounded-borders q-pa-sm">
-            <q-list dark>
-              <q-item tag="label" v-ripple>
-                <q-item-section>
-                  <q-item-label>Meinen Wochenplan teilen</q-item-label>
-                  <q-item-label caption>Andere sehen, was du diese Woche kochst</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-toggle v-model="shareMealPlan" color="primary" />
-                </q-item-section>
-              </q-item>
+          <q-card flat class="dynamic-card dynamic-border rounded-xl shadow-2">
+            <q-list separator>
+              <q-item v-for="ing in maintenanceIngredients" :key="ing.id"
+                class="q-py-lg q-px-lg list-item-hover column items-stretch">
 
-              <q-item tag="label" v-ripple>
-                <q-item-section>
-                  <q-item-label>Meine Einkaufsliste teilen</q-item-label>
-                  <q-item-label caption>Deine Artikel erscheinen auf der WG-Liste</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                  <q-toggle v-model="shareShoppingList" color="primary" />
-                </q-item-section>
+                <div class="row items-center full-width q-mb-md">
+                  <q-item-section avatar>
+                    <q-avatar size="60px" class="bg-dynamic-soft dynamic-border">
+                      <img v-if="ing.image" :src="ing.image" />
+                      <q-icon v-else name="help_outline" color="amber-8" />
+                    </q-avatar>
+                  </q-item-section>
+
+                  <q-item-section>
+                    <q-item-label class="text-h6 text-weight-bold dynamic-text">{{ ing.name }}</q-item-label>
+                    <q-item-label caption class="dynamic-text-muted">ID: {{ ing.id }}</q-item-label>
+                  </q-item-section>
+
+                  <q-item-section side>
+                    <div class="row q-gutter-sm">
+                      <q-btn-group flat class="bg-dynamic-soft rounded-borders">
+                        <q-btn flat icon="cloud_upload" color="primary">
+                          <q-tooltip>Neues Bild hochladen</q-tooltip>
+                          <q-file style="position:absolute; inset:0; opacity:0; cursor:pointer" :model-value="null"
+                            accept="image/*" @update:model-value="(f) => uploadImage(f as File | null, ing.id)" />
+                        </q-btn>
+                        <q-btn flat icon="photo_library" color="primary" @click="openImagePicker(ing.id)">
+                          <q-tooltip>Aus Galerie wählen</q-tooltip>
+                        </q-btn>
+                      </q-btn-group>
+
+                      <q-btn v-if="ing.image" flat round icon="no_photography" color="orange-8"
+                        @click="removeImage(ing.id)" class="bg-dynamic-soft">
+                        <q-tooltip>Bild entfernen</q-tooltip>
+                      </q-btn>
+
+                      <q-btn flat round icon="delete_outline" color="negative" @click="initiateDelete(ing)"
+                        class="bg-dynamic-soft" />
+                    </div>
+                  </q-item-section>
+                </div>
+
+                <div v-if="ingredientEdits[ing.id]"
+                  class="row q-col-gutter-md items-end bg-dynamic-soft q-pa-md rounded-borders dynamic-border">
+
+                  <div class="col-12 col-sm-4">
+                    <q-input v-model="ingredientEdits[ing.id]!.plural" label="Plural Form" dense filled
+                      :dark="isDarkMode" />
+                  </div>
+
+                  <div class="col-12 col-sm-4">
+                    <q-select v-model="ingredientEdits[ing.id]!.categoryId" :options="allCategories" option-value="id"
+                      option-label="name" emit-value map-options label="Kategorie" dense filled :dark="isDarkMode" />
+                  </div>
+
+                  <div class="col-12 col-sm-4">
+                    <q-btn v-if="ing.isVerified === false" color="positive" icon="verified"
+                      label="Bestätigen & Speichern" @click="verifyIngredient(ing.id)" class="full-width" unelevated
+                      no-caps />
+                    <q-btn v-else color="primary" icon="save" label="Details Speichern"
+                      @click="verifyIngredient(ing.id)" class="full-width" unelevated no-caps />
+                  </div>
+
+                </div>
+
               </q-item>
             </q-list>
-          </div>
-        </q-tab-panel>
-
-        <q-tab-panel name="about" class="q-pa-none">
-          <q-card flat class="settings-card bg-dark border-dark q-pa-xl text-center">
-            <q-icon name="restaurant_menu" size="5em" color="primary" class="q-mb-md" />
-            <div class="text-h4 text-weight-bold q-mb-sm">Culinario</div>
-            <div class="text-primary text-weight-bold q-mb-xl">Version 2.5.0 Pro</div>
-            <div class="text-body1 text-grey-5 max-width-container" style="max-width: 600px;">
-              Entwickelt mit Vue 3, Quasar und Firebase.<br><br>
-              Mit KI-gestütztem Rezept-Import, smartem Zutaten-Parser, automatischen Einkaufslisten und responsivem
-              Design.
-            </div>
           </q-card>
         </q-tab-panel>
 
       </q-tab-panels>
     </div>
 
-    <q-dialog v-model="showImagePicker">
-      <q-card class="bg-dark text-white border-dark dialog-card">
+    <q-dialog v-model="showImagePicker" backdrop-filter="blur(5px)">
+      <q-card class="dynamic-card dynamic-text dialog-card-large rounded-xl">
         <q-card-section class="row items-center q-pb-none">
-          <div class="text-h6 text-weight-bold">Bestehendes Bild wählen</div>
-          <q-space />
-          <q-btn icon="close" flat round dense v-close-popup color="grey-5" />
+          <div class="text-h6 text-weight-bold text-primary">Bild wählen</div>
+          <q-space /><q-btn icon="close" flat round v-close-popup color="grey-5" />
         </q-card-section>
-
-        <q-card-section class="q-pt-md">
-          <q-scroll-area style="height: 50vh;">
-            <div class="image-grid">
-              <q-img v-for="img in uniqueExistingImages" :key="img" :src="img"
-                class="gallery-img cursor-pointer rounded-borders" :ratio="1" @click="selectExistingImage(img)" />
-            </div>
-          </q-scroll-area>
+        <q-card-section class="q-pa-lg">
+          <div class="image-grid">
+            <q-img v-for="img in uniqueExistingImages" :key="img" :src="img"
+              class="cursor-pointer rounded-xl gallery-img transition-ease shadow-4" @click="selectExistingImage(img)"
+              :ratio="1" />
+          </div>
         </q-card-section>
       </q-card>
     </q-dialog>
 
-    <q-dialog v-model="showDeleteDialog" persistent>
-      <q-card class="bg-dark text-white border-dark" style="width: 450px; max-width: 95vw;">
-        <q-card-section class="bg-red-9 text-white row items-center">
-          <q-icon name="warning" size="md" class="q-mr-sm" />
-          <div class="text-h6 text-weight-bold">Zutat löschen</div>
+    <q-dialog v-model="showAddIngredientDialog" persistent backdrop-filter="blur(5px)">
+      <q-card class="dynamic-card dynamic-text rounded-xl" style="width: 500px; max-width: 95vw;">
+        <q-card-section class="row items-center bg-dynamic-soft">
+          <div class="text-h6 text-weight-bold text-primary">Neue Zutat erstellen</div>
+          <q-space />
+          <q-btn icon="close" flat round v-close-popup color="grey-5" />
         </q-card-section>
 
-        <q-card-section class="q-pt-md">
-          <p class="text-body1">Möchtest du <strong>{{ ingredientToDelete?.name }}</strong> wirklich aus der Datenbank
-            löschen?</p>
+        <q-card-section class="q-pa-lg q-gutter-y-md">
+          <q-input v-model="newIngredient.name" label="Name *" filled :dark="isDarkMode" color="primary"
+            class="custom-dynamic-input" />
+          <q-input v-model="newIngredient.plural" label="Plural Form" filled :dark="isDarkMode" color="primary"
+            class="custom-dynamic-input" />
 
-          <div v-if="recipesUsingIngredient.length > 0"
-            class="bg-dark-soft border-dark rounded-borders q-pa-md q-mt-md">
-            <div class="text-amber text-weight-bold q-mb-sm row items-center">
-              <q-icon name="error_outline" size="sm" class="q-mr-xs" />
-              Achtung! Zutat wird verwendet
+          <q-select v-model="newIngredient.categoryId" :options="allCategories" option-value="id" option-label="name"
+            emit-value map-options label="Kategorie *" filled :dark="isDarkMode" color="primary"
+            class="custom-dynamic-input" />
+
+          <div class="text-subtitle2 text-weight-bold q-mt-lg q-mb-sm">Zutaten-Bild</div>
+          <div class="row q-gutter-md items-center bg-dynamic-soft q-pa-md rounded-borders dynamic-border">
+            <q-avatar size="60px" class="bg-white dynamic-border shadow-1">
+              <img v-if="newIngredient.image" :src="newIngredient.image" />
+              <q-icon v-else-if="newIngredientImageFile" name="check_circle" color="positive" size="lg" />
+              <q-icon v-else name="image" color="grey-4" size="lg" />
+            </q-avatar>
+
+            <div class="column q-gutter-y-sm">
+              <q-btn outline icon="cloud_upload" color="primary" label="Upload von Gerät"
+                class="relative-position rounded-borders bg-white" no-caps size="sm">
+                <q-file style="position:absolute; inset:0; opacity:0; cursor:pointer"
+                  :model-value="newIngredientImageFile" accept="image/*"
+                  @update:model-value="val => { newIngredientImageFile = val as File; newIngredient.image = ''; }" />
+              </q-btn>
+              <q-btn outline icon="photo_library" label="Aus Galerie wählen" color="primary"
+                @click="openImagePicker('NEW')" class="rounded-borders bg-white" no-caps size="sm" />
             </div>
-            <p class="text-grey-4 text-caption">
-              Diese Zutat kommt aktuell in <strong>{{ recipesUsingIngredient.length }} Rezept(en)</strong> vor.
-              Wenn du sie löschst, musst du festlegen, durch welche Zutat sie in diesen Rezepten ersetzt werden soll:
-            </p>
-
-            <q-select v-model="swapIngredientId" :options="allIngredientsOptions" emit-value map-options
-              label="Ersatz-Zutat wählen" filled dark class="custom-dark-input q-mt-md" />
           </div>
+
+          <q-item tag="label" v-if="isSpecialAdmin"
+            class="bg-dynamic-soft rounded-borders q-mt-md q-pa-sm dynamic-border">
+            <q-item-section>
+              <q-item-label class="text-weight-bold text-primary">Als System-Zutat anlegen</q-item-label>
+              <q-item-label caption>Zutat ist direkt für alle verifiziert</q-item-label>
+            </q-item-section>
+            <q-item-section side>
+              <q-toggle v-model="newIngredient.isSystem" color="primary" />
+            </q-item-section>
+          </q-item>
         </q-card-section>
 
-        <q-card-actions align="right" class="q-pa-md">
-          <q-btn flat label="Abbrechen" v-close-popup color="white" no-caps :disable="isDeleting" />
-          <q-btn :label="recipesUsingIngredient.length > 0 ? 'Löschen & Ersetzen' : 'Zutat Löschen'" color="negative"
-            @click="executeDeleteAndSwap" :loading="isDeleting" no-caps unelevated class="text-weight-bold" />
+        <q-card-actions align="right" class="q-pa-lg bg-dynamic-soft dynamic-border">
+          <q-btn flat label="Abbrechen" v-close-popup color="grey-6" no-caps />
+          <q-btn color="primary" label="Zutat speichern" @click="handleSaveNewIngredient" unelevated no-caps
+            class="rounded-borders q-px-lg text-weight-bold shadow-2" />
         </q-card-actions>
       </q-card>
     </q-dialog>
 
-    <q-dialog v-model="showMarketDialog" persistent transition-show="scale" transition-hide="scale">
-      <q-card class="bg-dark text-white border-dark dialog-card">
-        <q-card-section class="row items-center q-pb-none">
-          <div class="text-h6 text-weight-bold">{{ isEditMode ? 'Supermarkt bearbeiten' : 'Neuer Supermarkt' }}</div>
-          <q-space />
-          <q-btn icon="close" flat round dense v-close-popup color="grey-5" />
+    <q-dialog v-model="showMarketDialog" persistent backdrop-filter="blur(5px)">
+      <q-card class="dynamic-card dynamic-text dialog-card-medium rounded-xl overflow-hidden">
+        <q-card-section class="bg-dynamic-soft q-pa-lg">
+          <div class="text-h5 text-weight-bold">Supermarkt-Layout</div>
         </q-card-section>
-
-        <q-card-section class="q-pt-md">
-          <q-input v-model="editingMarket.name" label="Name des Supermarkts" filled dark
-            class="custom-dark-input q-mb-lg" autofocus />
-
+        <q-card-section class="q-pa-lg">
+          <q-input v-model="editingMarket.name" label="Name" filled :dark="isDarkMode" color="primary"
+            class="q-mb-xl custom-dynamic-input text-h6" />
           <div class="row q-col-gutter-lg">
             <div class="col-12 col-md-6">
-              <div class="row items-center q-mb-sm">
-                <q-icon name="route" color="primary" size="sm" class="q-mr-sm" />
-                <span class="text-subtitle2 text-weight-bold">Dein Laufweg</span>
-              </div>
-
-              <div v-if="editingMarket.categoryOrder.length === 0"
-                class="text-grey-6 text-caption q-pa-md border-dashed rounded-borders text-center">
-                Ziehe Kategorien von rechts hierher, um den Laufweg zu definieren.
-              </div>
-
-              <q-list separator class="rounded-borders overflow-hidden border-dark bg-dark-soft" v-else>
-                <q-item v-for="(cat, index) in selectedCategoriesObjects" :key="cat.id" class="q-pa-sm">
-                  <q-item-section avatar style="min-width: 30px;">
-                    <q-avatar size="sm" color="primary" text-color="dark" class="text-weight-bold">{{ index + 1
-                    }}</q-avatar>
-                  </q-item-section>
-                  <q-item-section class="text-weight-medium">{{ cat.name }}</q-item-section>
+              <div class="text-subtitle2 text-primary text-uppercase text-weight-bold q-mb-md tracking-widest">
+                Reihenfolge</div>
+              <q-list separator class="bg-dynamic-soft rounded-borders dynamic-border shadow-inset scroll"
+                style="max-height: 400px">
+                <q-item v-for="(cat, i) in selectedCategoriesObjects" :key="cat.id" class="q-py-md list-item-hover">
+                  <q-item-section avatar><q-badge color="primary">{{ i + 1 }}</q-badge></q-item-section>
+                  <q-item-section class="text-weight-bold">{{ cat.name }}</q-item-section>
                   <q-item-section side>
-                    <div class="row items-center no-wrap">
-                      <div class="column q-mr-sm">
-                        <q-btn flat round dense icon="expand_less" size="xs" color="grey-5"
-                          @click="moveCategory(index, -1)" :disable="index === 0" />
-                        <q-btn flat round dense icon="expand_more" size="xs" color="grey-5"
-                          @click="moveCategory(index, 1)" :disable="index === editingMarket.categoryOrder.length - 1" />
-                      </div>
-                      <q-btn flat round dense icon="remove_circle_outline" color="red-4"
+                    <div class="row no-wrap q-gutter-xs">
+                      <q-btn flat dense icon="expand_less" color="grey-5" @click="moveCategory(i, -1)"
+                        :disable="i === 0" />
+                      <q-btn flat dense icon="expand_more" color="grey-5" @click="moveCategory(i, 1)"
+                        :disable="i === editingMarket.categoryOrder.length - 1" />
+                      <q-btn flat dense icon="remove_circle_outline" color="red-4"
                         @click="removeCategoryFromMarket(cat.id)" />
                     </div>
                   </q-item-section>
                 </q-item>
               </q-list>
             </div>
-
             <div class="col-12 col-md-6">
-              <div class="row items-center q-mb-sm">
-                <q-icon name="inventory_2" color="grey-6" size="sm" class="q-mr-sm" />
-                <span class="text-subtitle2 text-weight-bold text-grey-5">Verfügbar</span>
-              </div>
-
-              <q-list separator class="rounded-borders overflow-hidden border-dark bg-dark-soft">
-                <q-item v-for="cat in availableCategoriesForEdit" :key="cat.id" clickable v-ripple
-                  @click="addCategoryToMarket(cat.id)" class="hover-primary">
-                  <q-item-section avatar style="min-width: 30px;"><q-icon name="add" color="primary"
-                      size="sm" /></q-item-section>
-                  <q-item-section>{{ cat.name }}</q-item-section>
+              <div class="text-subtitle2 dynamic-text-muted text-uppercase text-weight-bold q-mb-md tracking-widest">
+                Verfügbar</div>
+              <q-list class="bg-dynamic-soft rounded-borders dynamic-border scroll" style="max-height: 400px">
+                <q-item v-for="c in availableCategoriesForEdit" :key="c.id" clickable @click="addCategoryToMarket(c.id)"
+                  class="list-item-hover q-py-md">
+                  <q-item-section>{{ c.name }}</q-item-section><q-item-section side><q-icon name="add"
+                      color="primary" /></q-item-section>
                 </q-item>
-                <div v-if="availableCategoriesForEdit.length === 0"
-                  class="q-pa-md text-grey-6 text-center text-caption">Alle Kategorien zugeordnet.</div>
               </q-list>
             </div>
           </div>
         </q-card-section>
-
-        <q-card-actions align="right" class="q-pa-md border-top">
-          <q-btn flat label="Abbrechen" v-close-popup no-caps color="white" />
+        <q-card-actions align="right" class="q-pa-lg bg-dynamic-soft dynamic-border">
+          <q-btn flat label="Abbrechen" v-close-popup color="grey-6" no-caps />
           <q-btn color="primary" label="Speichern" @click="saveMarket" no-caps unelevated
-            class="q-px-md rounded-borders text-weight-bold" />
+            class="q-px-xl text-weight-bold rounded-borders" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <q-dialog v-model="showDeleteDialog" persistent>
+      <q-card class="dynamic-card dynamic-text rounded-xl" style="width: 450px">
+        <q-card-section class="bg-negative text-white q-pa-lg">
+          <div class="text-h6 text-weight-bold">Löschen bestätigen</div>
+        </q-card-section>
+        <q-card-section class="q-pa-lg">
+          <p class="text-body1">Möchtest du <strong>{{ ingredientToDelete?.name }}</strong> wirklich löschen?</p>
+          <div v-if="recipesUsingIngredient.length > 0"
+            class="bg-dynamic-soft q-pa-md rounded-borders dynamic-border q-mt-md">
+            <p class="text-amber-8 text-weight-bold q-mb-sm">Achtung!</p>
+            <p class="text-caption dynamic-text-muted q-mb-md">Zutat ist in {{ recipesUsingIngredient.length }}
+              Rezepten. Wähle einen Ersatz:</p>
+            <q-select v-model="swapIngredientId" :options="allIngredientsOptions" emit-value map-options filled
+              :dark="isDarkMode" dense color="primary" class="custom-dynamic-input" label="Ersatz-Zutat" />
+          </div>
+        </q-card-section>
+        <q-card-actions align="right" class="q-pa-lg">
+          <q-btn flat label="Abbrechen" v-close-popup color="grey-6" no-caps />
+          <q-btn color="negative" label="Löschen" @click="executeDeleteAndSwap" :loading="isDeleting" no-caps unelevated
+            class="rounded-borders q-px-lg" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -857,86 +1317,140 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* --- GLOBALES DESIGN --- */
-.bg-dark-page {
-  background-color: #161616;
-  min-height: 100vh;
-}
-
+/* GLOBALE STRUKTUR */
 .max-width-container {
-  max-width: 1100px;
+  max-width: 1400px;
+  /* Einheitlich mit MealPlanPage */
   margin: 0 auto;
+  width: 100%;
 }
 
-.border-dark {
-  border: 1px solid rgba(255, 255, 255, 0.05) !important;
+.transition-ease {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
-.bg-dark-soft {
-  background-color: rgba(255, 255, 255, 0.03);
+/* TABS STYLING */
+.tabs-container {
+  width: 100%;
+  display: block;
+  /* Sicherstellen, dass kein Flex-Wrapping des Vaters stört */
 }
 
-.separator-dark {
-  border-color: rgba(255, 255, 255, 0.05);
+.settings-tabs {
+  width: 100% !important;
+  padding: 4px;
 }
 
-:deep(.q-tab-panel) {
-  padding: 0;
+@media (max-width: 600px) {
+  .tabs-container {
+    width: 100%;
+  }
+
+  .settings-tabs {
+    width: 100%;
+  }
+
+  :deep(.q-tab__label) {
+    font-size: 11px;
+  }
 }
 
-/* --- KARTEN --- */
-.settings-card {
+@media (max-width: 800px) {
+  :deep(.q-tab) {
+    flex: 0 0 auto;
+    /* Auf Handy zurück zu Auto-Breite für Scrollbarkeit */
+    padding: 0 20px;
+  }
+}
+
+/* Fix für Quasar: Stellt sicher, dass der interne Container der Tabs 100% nutzt */
+:deep(.q-tabs__content) {
+  width: 100%;
+}
+
+:deep(.q-tabs__content) {
+  overflow: visible !important;
+}
+
+:deep(.q-tab) {
+  flex: 1 1 0;
+  /* Jedes Tab wächst gleichmäßig */
+  min-height: 56px;
+}
+
+/* KARTEN & KOMPONENTEN */
+.rounded-xl {
+  border-radius: 20px;
+}
+
+.card-hover {
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.card-hover:hover {
+  border-color: var(--q-primary) !important;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--q-primary), transparent 85%);
+}
+
+.profile-avatar {
+  border: 3px solid rgba(255, 255, 255, 0.08);
+}
+
+.wg-code-box {
+  background: color-mix(in srgb, var(--q-primary), transparent 90%);
+  border: 2px dashed var(--q-primary);
+  display: inline-flex;
   border-radius: 16px;
-  overflow: hidden;
+  transition: transform 0.2s, background 0.2s;
 }
 
-/* --- BILDER GALERIE --- */
+.wg-code-box:hover {
+  transform: scale(1.03);
+  background: color-mix(in srgb, var(--q-primary), transparent 85%);
+}
+
+/* INPUTS */
+:deep(.custom-dynamic-input .q-field__control) {
+  border-radius: 14px;
+  padding: 0 16px;
+}
+
+:global(.body--dark) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+:global(.body--light) :deep(.custom-dynamic-input .q-field__control) {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+/* UTILS */
+.center-block {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.max-width-600 {
+  max-width: 600px;
+}
+
 .image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-  gap: 12px;
-  padding: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 14px;
 }
 
-.gallery-img {
-  border: 2px solid transparent;
-  transition: all 0.2s ease;
+.dialog-card-large {
+  width: 900px;
+  max-width: 95vw;
 }
 
-.gallery-img:hover {
-  transform: scale(1.05);
-  border-color: #66a182;
-  box-shadow: 0 4px 12px rgba(102, 161, 130, 0.3);
-}
-
-/* --- DIALOG --- */
-.dialog-card {
+.dialog-card-medium {
   width: 800px;
   max-width: 95vw;
-  border-radius: 16px;
 }
 
-.border-dashed {
-  border: 1px dashed rgba(255, 255, 255, 0.15);
-}
-
-.border-top {
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-/* --- INPUTS --- */
-:deep(.custom-dark-input .q-field__control) {
-  background-color: #222222 !important;
-  border-radius: 8px;
-}
-
-:deep(.custom-dark-input .q-field__control:before) {
-  border-bottom: none !important;
-}
-
-/* --- HOVER EFFEKTE --- */
-.hover-primary:hover {
-  background-color: rgba(102, 161, 130, 0.1) !important;
-  color: #66a182;
+.hover-negative-btn:hover {
+  color: var(--q-negative) !important;
 }
 </style>
